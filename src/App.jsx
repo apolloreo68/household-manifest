@@ -109,7 +109,6 @@ export default function App() {
   const [selectedCategory, setSelectedCategory] = useState(null); // "" means uncategorized
 
   const [homeSearch, setHomeSearch] = useState("");
-  const [personFilter, setPersonFilter] = useState("");
 
   const [propertyModal, setPropertyModal] = useState(null); // { mode:'create'|'edit', property? }
   const [categoryModal, setCategoryModal] = useState(null); // { mode, category? }
@@ -135,9 +134,46 @@ export default function App() {
     setSelectedCategory(state.selectedCategory);
   };
 
+  const closeAllModals = () => {
+    setPropertyModal(null);
+    setCategoryModal(null);
+    setPeopleModal(false);
+    setItemModal(null);
+    setItemDetail(null);
+    setTaskModal(null);
+    setTaskDetail(null);
+    setConfirmDelete(null);
+    setWhoAreYouOpen(false);
+  };
+
+  const anyModalOpen = !!(
+    propertyModal || categoryModal || peopleModal || itemModal || itemDetail ||
+    taskModal || taskDetail || confirmDelete || whoAreYouOpen
+  );
+  const modalHistoryRef = useRef(false);
+
+  // Any popup counts as its own "screen" for back-button purposes: opening
+  // one adds a history entry, and closing it — whether by tapping its own X
+  // button or by pressing the phone's back button — steps back exactly one
+  // entry, so back never skips straight past a popup and out of the app.
+  useEffect(() => {
+    if (anyModalOpen && !modalHistoryRef.current) {
+      window.history.pushState({ modalOpen: true }, "");
+      modalHistoryRef.current = true;
+    } else if (!anyModalOpen && modalHistoryRef.current) {
+      modalHistoryRef.current = false;
+      window.history.back();
+    }
+  }, [anyModalOpen]);
+
   useEffect(() => {
     window.history.replaceState({ view: "home", selectedPropertyId: null, selectedCategory: null }, "");
     const onPopState = (e) => {
+      if (modalHistoryRef.current) {
+        modalHistoryRef.current = false;
+        closeAllModals();
+        return;
+      }
       const s = e.state || { view: "home", selectedPropertyId: null, selectedCategory: null };
       setView(s.view);
       setSelectedPropertyId(s.selectedPropertyId);
@@ -221,18 +257,14 @@ export default function App() {
   }, [items, view, selectedPropertyId, selectedCategory]);
 
   const homeSearchResults = useMemo(() => {
-    if (!homeSearch.trim() && !personFilter) return null;
+    if (!homeSearch.trim()) return null;
     const q = homeSearch.trim().toLowerCase();
     return items.filter((it) => {
-      if (personFilter && it.holderId !== personFilter) return false;
-      if (q) {
-        const hay = [it.name, it.category, it.notes, ...(it.customFields || []).flatMap((f) => [f.key, f.value])]
-          .join(" ").toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
+      const hay = [it.name, it.category, it.notes, ...(it.customFields || []).flatMap((f) => [f.key, f.value])]
+        .join(" ").toLowerCase();
+      return hay.includes(q);
     });
-  }, [items, homeSearch, personFilter]);
+  }, [items, homeSearch]);
 
   const personName = (id) => people.find((p) => p.id === id)?.name || null;
   const propertyName = (id) => properties.find((p) => p.id === id)?.name || "Unknown";
@@ -386,21 +418,9 @@ export default function App() {
             </div>
           )}
           {view === "home" && (
-            <select
-              style={styles.filterSelect}
-              value={personFilter}
-              onChange={(e) => {
-                if (e.target.value === "__manage__") { setPeopleModal(true); return; }
-                setPersonFilter(e.target.value);
-              }}
-            >
-              <option value="">People</option>
-              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              <option disabled>──────────</option>
-              <option value="__manage__" style={{ fontSize: "0.85em", fontStyle: "italic", color: "#6E828A" }}>
-                Manage people…
-              </option>
-            </select>
+            <button style={styles.secondaryBtn} onClick={() => setPeopleModal(true)}>
+              <User size={14} /> People
+            </button>
           )}
           <button style={styles.secondaryBtn} onClick={() => signOut(auth)} title="Sign out">
             <LogOut size={14} />
