@@ -3,7 +3,8 @@ import {
   Home, Warehouse, Plus, X, Search, User, Package, Sofa, Palette,
   UtensilsCrossed, Dumbbell, Shirt, BookOpen, Tv, Wrench, Box,
   Trash2, Edit3, Tag, Loader2, AlertCircle, Check, Camera,
-  LogOut, Mail, Lock, Image as ImageIcon, ImageOff, ChevronDown, ChevronRight, ChevronLeft
+  LogOut, Mail, Lock, Image as ImageIcon, ImageOff, ChevronDown, ChevronRight, ChevronLeft,
+  ClipboardList, ArrowRight, CheckCircle2
 } from "lucide-react";
 import { db, auth } from "./firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
@@ -16,7 +17,7 @@ const MANIFEST_DOC = doc(db, "manifest", "household");
 const TILE_COLORS = ["#2E7A83", "#0F3B4D", "#E8A33D", "#6E9B8C", "#3F5F73", "#4C93A0", "#C98A2E", "#557A85"];
 
 const uid = () => Math.random().toString(36).slice(2, 10);
-const emptyData = () => ({ properties: [], people: [], categories: [], items: [] });
+const emptyData = () => ({ properties: [], people: [], categories: [], items: [], tasks: [] });
 
 function categoryIcon(name = "") {
   const n = name.toLowerCase();
@@ -115,6 +116,8 @@ export default function App() {
   const [peopleModal, setPeopleModal] = useState(false);
   const [itemModal, setItemModal] = useState(null); // { mode, item? }
   const [itemDetail, setItemDetail] = useState(null); // the item currently shown in the detail popup
+  const [taskModal, setTaskModal] = useState(null); // { mode, task? }
+  const [taskDetail, setTaskDetail] = useState(null); // id of the task currently shown in the detail popup
   const [confirmDelete, setConfirmDelete] = useState(null); // { type, id, label }
   const [whoAreYouOpen, setWhoAreYouOpen] = useState(false);
 
@@ -295,6 +298,24 @@ export default function App() {
   };
   const deleteItem = (id) => setData((d) => ({ ...d, items: d.items.filter((it) => it.id !== id) }));
 
+  const upsertTask = (task) => {
+    setData((d) => ({
+      ...d,
+      tasks: (d.tasks || []).some((t) => t.id === task.id)
+        ? d.tasks.map((t) => (t.id === task.id ? task : t))
+        : [...(d.tasks || []), task],
+    }));
+  };
+  const deleteTask = (id) => setData((d) => ({ ...d, tasks: (d.tasks || []).filter((t) => t.id !== id) }));
+  const completeTask = (task) => {
+    setData((d) => ({
+      ...d,
+      items: d.items.map((it) => (task.itemIds.includes(it.id) ? { ...it, propertyId: task.destinationPropertyId } : it)),
+      tasks: (d.tasks || []).filter((t) => t.id !== task.id),
+    }));
+    setTaskDetail(null);
+  };
+
   if (!authChecked) {
     return (
       <div style={styles.loadingScreen}>
@@ -375,7 +396,10 @@ export default function App() {
             >
               <option value="">People</option>
               {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              <option value="__manage__">Manage people…</option>
+              <option disabled>──────────</option>
+              <option value="__manage__" style={{ fontSize: "0.85em", fontStyle: "italic", color: "#6E828A" }}>
+                Manage people…
+              </option>
             </select>
           )}
           <button style={styles.secondaryBtn} onClick={() => signOut(auth)} title="Sign out">
@@ -450,9 +474,13 @@ export default function App() {
       {peopleModal && (
         <PeopleModal
           people={people}
+          tasks={data.tasks || []}
+          propertyName={propertyName}
           onClose={() => setPeopleModal(false)}
           onSave={savePerson}
           onDelete={deletePerson}
+          onAssignTask={(personId) => { setPeopleModal(false); setTaskModal({ mode: "create", presetPersonId: personId }); }}
+          onOpenTask={(taskId) => { setPeopleModal(false); setTaskDetail(taskId); }}
         />
       )}
 
@@ -481,6 +509,32 @@ export default function App() {
         />
       )}
 
+      {taskModal && (
+        <TaskModal
+          task={taskModal.task}
+          presetPersonId={taskModal.presetPersonId}
+          people={people}
+          properties={properties}
+          items={items}
+          propertyName={propertyName}
+          onClose={() => setTaskModal(null)}
+          onSave={(task) => { upsertTask(task); setTaskModal(null); }}
+        />
+      )}
+
+      {taskDetail && (
+        <TaskDetailModal
+          task={(data.tasks || []).find((t) => t.id === taskDetail) || null}
+          items={items}
+          personName={personName}
+          propertyName={propertyName}
+          onClose={() => setTaskDetail(null)}
+          onEdit={(t) => { setTaskModal({ mode: "edit", task: t }); setTaskDetail(null); }}
+          onDelete={(t) => { setConfirmDelete({ type: "task", id: t.id, label: `${personName(t.personId) || "This"} task` }); setTaskDetail(null); }}
+          onComplete={completeTask}
+        />
+      )}
+
       {confirmDelete && (
         <ConfirmModal
           label={confirmDelete.label}
@@ -490,6 +544,7 @@ export default function App() {
             if (confirmDelete.type === "property") deleteProperty(confirmDelete.id);
             if (confirmDelete.type === "category") deleteCategory(confirmDelete.id);
             if (confirmDelete.type === "item") deleteItem(confirmDelete.id);
+            if (confirmDelete.type === "task") deleteTask(confirmDelete.id);
             setConfirmDelete(null);
           }}
         />
@@ -535,7 +590,8 @@ function Breadcrumb({ property, category, onHome, onProperty }) {
 
 /* ---------- Home: collapsible sections ---------- */
 function HomeView({
-  properties, categories, itemCountForProperty, itemCountForCategoryGlobal, hasGlobalUncategorized,
+  properties, categories,
+  itemCountForProperty, itemCountForCategoryGlobal, hasGlobalUncategorized,
   onOpen, onEdit, onDelete, onAdd, onOpenGlobalCategory,
 }) {
   const houses = properties.filter((p) => p.type === "house");
@@ -886,6 +942,134 @@ function ItemDetailModal({ item, propertyName, personName, showLocation, onClose
   );
 }
 
+/* ---------- Task (move list) modal ---------- */
+function TaskModal({ task, presetPersonId, people, properties, items, propertyName, onClose, onSave }) {
+  const [personId, setPersonId] = useState(task?.personId || presetPersonId || people[0]?.id || "");
+  const [destinationPropertyId, setDestinationPropertyId] = useState(task?.destinationPropertyId || properties[0]?.id || "");
+  const [itemIds, setItemIds] = useState(task?.itemIds || []);
+  const [notes, setNotes] = useState(task?.notes || "");
+  const [search, setSearch] = useState("");
+  const [error, setError] = useState("");
+
+  const candidateItems = useMemo(() => {
+    return items
+      .filter((it) => it.propertyId !== destinationPropertyId || itemIds.includes(it.id))
+      .filter((it) => !search.trim() || it.name.toLowerCase().includes(search.trim().toLowerCase()));
+  }, [items, destinationPropertyId, itemIds, search]);
+
+  const toggleItem = (id) => {
+    setItemIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  };
+
+  const handleSave = () => {
+    if (!personId) return setError("Choose who this is assigned to.");
+    if (!destinationPropertyId) return setError("Choose where these items are headed.");
+    if (itemIds.length === 0) return setError("Pick at least one item to move.");
+    onSave({
+      id: task?.id || uid(),
+      personId,
+      destinationPropertyId,
+      itemIds,
+      notes: notes.trim(),
+      dateCreated: task?.dateCreated || new Date().toISOString(),
+    });
+  };
+
+  return (
+    <ModalShell onClose={onClose} title={task ? "Edit move task" : "Assign a move task"} width={540}>
+      <div style={styles.formGrid}>
+        <div style={styles.formRow2}>
+          <Field label="Assign to">
+            <select style={styles.input} value={personId} onChange={(e) => setPersonId(e.target.value)}>
+              {people.length === 0 && <option value="">Add a person first</option>}
+              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Move to">
+            <select style={styles.input} value={destinationPropertyId} onChange={(e) => setDestinationPropertyId(e.target.value)}>
+              {properties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </Field>
+        </div>
+
+        <Field label={`Items to move (${itemIds.length} selected)`}>
+          <input
+            style={{ ...styles.input, marginBottom: 6 }}
+            placeholder="Search items…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <div style={styles.taskItemPicker}>
+            {candidateItems.length === 0 && (
+              <div style={{ fontSize: 12.5, color: MUTED, padding: "8px 4px" }}>No matching items.</div>
+            )}
+            {candidateItems.map((it) => (
+              <label key={it.id} style={styles.taskItemPickerRow}>
+                <input type="checkbox" checked={itemIds.includes(it.id)} onChange={() => toggleItem(it.id)} />
+                <span style={{ flex: 1 }}>{it.name}</span>
+                <span style={styles.taskItemPickerLocation}>{propertyName(it.propertyId)}</span>
+              </label>
+            ))}
+          </div>
+        </Field>
+
+        <Field label="Notes">
+          <textarea style={{ ...styles.input, minHeight: 50, resize: "vertical" }} value={notes}
+            onChange={(e) => setNotes(e.target.value)} placeholder="Anything worth mentioning" />
+        </Field>
+
+        {error && <div style={styles.formError}><AlertCircle size={14} /> {error}</div>}
+
+        <div style={styles.formActions}>
+          <button style={styles.secondaryBtn} onClick={onClose}>Cancel</button>
+          <button style={styles.primaryBtn} onClick={handleSave}><Check size={15} /> {task ? "Save changes" : "Assign task"}</button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function TaskDetailModal({ task, items, personName, propertyName, onClose, onEdit, onDelete, onComplete }) {
+  if (!task) return null;
+  const taskItems = task.itemIds.map((id) => items.find((it) => it.id === id)).filter(Boolean);
+  return (
+    <ModalShell onClose={onClose} title={`Move task: ${personName(task.personId)}`} width={480}>
+      <div style={styles.formGrid}>
+        <div style={styles.detailRow}>
+          <span style={styles.detailLabel}>Assigned to</span>
+          <span style={styles.detailValue}>{personName(task.personId)}</span>
+        </div>
+        <div style={styles.detailRow}>
+          <span style={styles.detailLabel}>Destination</span>
+          <span style={styles.detailValue}>{propertyName(task.destinationPropertyId)}</span>
+        </div>
+        {task.notes && (
+          <div>
+            <div style={styles.fieldLabel}>Notes</div>
+            <div style={styles.tagNotes}>{task.notes}</div>
+          </div>
+        )}
+        <div>
+          <div style={styles.fieldLabel}>Items ({taskItems.length})</div>
+          <div style={styles.taskItemPicker}>
+            {taskItems.map((it) => (
+              <div key={it.id} style={styles.taskItemPickerRow}>
+                <span style={{ flex: 1 }}>{it.name}</span>
+                <span style={styles.taskItemPickerLocation}>currently: {propertyName(it.propertyId)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div style={styles.formActions}>
+          <button style={styles.secondaryBtn} onClick={() => onDelete(task)}><Trash2 size={14} /> Delete</button>
+          <button style={styles.secondaryBtn} onClick={() => onEdit(task)}><Edit3 size={14} /> Edit</button>
+          <button style={styles.primaryBtn} onClick={() => onComplete(task)}><CheckCircle2 size={15} /> Mark moved</button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
 /* ---------- Empty state ---------- */
 function EmptyState({ icon, title, body, actionLabel, onAction }) {
   return (
@@ -1124,13 +1308,14 @@ function CategoryModal({ initial, existing, onClose, onSave }) {
 }
 
 /* ---------- People modal ---------- */
-function PeopleModal({ people, onClose, onSave, onDelete }) {
+function PeopleModal({ people, tasks, propertyName, onClose, onSave, onDelete, onAssignTask, onOpenTask }) {
   const [newName, setNewName] = useState("");
   const [editingId, setEditingId] = useState(null);
   const [editingName, setEditingName] = useState("");
+  const [selectedId, setSelectedId] = useState(null);
 
   return (
-    <ModalShell onClose={onClose} title="Family members" width={420}>
+    <ModalShell onClose={onClose} title="Family members" width={440}>
       <div style={styles.addRow}>
         <input style={{ ...styles.input, flex: 1 }} placeholder="Name" value={newName}
           onChange={(e) => setNewName(e.target.value)}
@@ -1140,25 +1325,57 @@ function PeopleModal({ people, onClose, onSave, onDelete }) {
         </button>
       </div>
       <div style={styles.manageList}>
-        {people.map((p) => (
-          <div key={p.id} style={styles.manageItemRow}>
-            {editingId === p.id ? (
-              <>
-                <input style={{ ...styles.input, flex: 1 }} value={editingName} onChange={(e) => setEditingName(e.target.value)} autoFocus />
-                <button style={styles.iconBtn} onClick={() => { onSave(editingName.trim() || p.name, p.id); setEditingId(null); }}><Check size={14} /></button>
-                <button style={styles.iconBtn} onClick={() => setEditingId(null)}><X size={14} /></button>
-              </>
-            ) : (
-              <>
-                <span style={{ display: "flex", alignItems: "center", gap: 8 }}><User size={14} /> {p.name}</span>
-                <div style={{ display: "flex", gap: 2 }}>
-                  <button style={styles.iconBtn} onClick={() => { setEditingId(p.id); setEditingName(p.name); }}><Edit3 size={13} /></button>
-                  <button style={styles.iconBtn} onClick={() => onDelete(p.id)}><Trash2 size={13} /></button>
+        {people.map((p) => {
+          const isSelected = selectedId === p.id;
+          const personTasks = tasks.filter((t) => t.personId === p.id);
+          return (
+            <div key={p.id} style={styles.personBlock}>
+              <div style={styles.manageItemRow}>
+                {editingId === p.id ? (
+                  <>
+                    <input style={{ ...styles.input, flex: 1 }} value={editingName} onChange={(e) => setEditingName(e.target.value)} autoFocus />
+                    <button style={styles.iconBtn} onClick={() => { onSave(editingName.trim() || p.name, p.id); setEditingId(null); }}><Check size={14} /></button>
+                    <button style={styles.iconBtn} onClick={() => setEditingId(null)}><X size={14} /></button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      style={styles.personNameBtn}
+                      onClick={() => setSelectedId(isSelected ? null : p.id)}
+                    >
+                      <User size={14} /> {p.name}
+                      {isSelected ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    </button>
+                    <div style={{ display: "flex", gap: 2 }}>
+                      <button style={styles.iconBtn} onClick={() => { setEditingId(p.id); setEditingName(p.name); }}><Edit3 size={13} /></button>
+                      <button style={styles.iconBtn} onClick={() => onDelete(p.id)}><Trash2 size={13} /></button>
+                    </div>
+                  </>
+                )}
+              </div>
+              {isSelected && editingId !== p.id && (
+                <div style={styles.personExpanded}>
+                  {personTasks.length > 0 && (
+                    <div style={styles.taskList}>
+                      {personTasks.map((t) => (
+                        <div key={t.id} style={styles.taskRow} onClick={() => onOpenTask(t.id)}>
+                          <div style={styles.taskRowLeft}>
+                            <ArrowRight size={13} color={MUTED} />
+                            <span style={styles.taskRowDest}>{propertyName(t.destinationPropertyId)}</span>
+                          </div>
+                          <span style={styles.taskRowMeta}>{t.itemIds.length} item{t.itemIds.length === 1 ? "" : "s"}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <button style={styles.addFieldBtn} onClick={() => onAssignTask(p.id)}>
+                    <ClipboardList size={13} /> Assign a move task to {p.name}
+                  </button>
                 </div>
-              </>
-            )}
-          </div>
-        ))}
+              )}
+            </div>
+          );
+        })}
         {people.length === 0 && <div style={styles.sidebarEmpty}>No one added yet.</div>}
       </div>
     </ModalShell>
@@ -1167,10 +1384,11 @@ function PeopleModal({ people, onClose, onSave, onDelete }) {
 
 /* ---------- Confirm modal ---------- */
 function ConfirmModal({ label, type, onCancel, onConfirm }) {
-  const noun = type === "property" ? "property" : type === "category" ? "category" : "item";
+  const noun = type === "property" ? "property" : type === "category" ? "category" : type === "task" ? "task" : "item";
   const warning =
     type === "property" ? "This will also remove every item logged under it."
     : type === "category" ? "Items in this category will move to Uncategorized, not be deleted."
+    : type === "task" ? "The items themselves won't be touched — only the task."
     : "This can't be undone.";
   return (
     <ModalShell onClose={onCancel} title={`Delete this ${noun}?`} width={400}>
@@ -1428,6 +1646,26 @@ const styles = {
   collapsibleBarLabel: { fontFamily: FONT_DISPLAY, fontSize: 15.5, fontWeight: 600 },
   collapsibleBarCount: { fontFamily: FONT_MONO, fontSize: 11.5, color: MUTED, background: PAPER_DARK, padding: "2px 8px", borderRadius: 20 },
   collapsibleContent: { padding: "14px 2px 4px" },
+
+  taskList: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 },
+  taskRow: {
+    display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10,
+    background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 4, padding: "10px 12px", cursor: "pointer",
+  },
+  taskRowLeft: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, flexWrap: "wrap" },
+  taskRowPerson: { fontWeight: 600, color: TEXT },
+  taskRowDest: { color: TEXT },
+  taskRowMeta: { fontSize: 11.5, color: MUTED, fontFamily: FONT_MONO, whiteSpace: "nowrap" },
+
+  taskItemPicker: {
+    maxHeight: 220, overflowY: "auto", border: `1px solid ${BORDER}`, borderRadius: 4,
+    display: "flex", flexDirection: "column",
+  },
+  taskItemPickerRow: {
+    display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", fontSize: 13,
+    borderBottom: `1px solid ${BORDER}`, cursor: "pointer",
+  },
+  taskItemPickerLocation: { fontSize: 11, color: MUTED, fontFamily: FONT_MONO, whiteSpace: "nowrap" },
   tileGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 },
   tile: {
     position: "relative", background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 3,
@@ -1508,5 +1746,11 @@ const styles = {
   addRow: { display: "flex", gap: 8, marginBottom: 12 },
   manageList: { display: "flex", flexDirection: "column", gap: 6 },
   manageItemRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 4px", borderBottom: `1px solid ${BORDER}` },
+  personBlock: {},
+  personNameBtn: {
+    display: "flex", alignItems: "center", gap: 8, background: "transparent", border: "none",
+    cursor: "pointer", fontSize: 13.5, color: TEXT, padding: "4px 0", flex: 1, textAlign: "left",
+  },
+  personExpanded: { padding: "4px 4px 12px 22px", display: "flex", flexDirection: "column", gap: 8 },
   sidebarEmpty: { fontSize: 12, color: MUTED, padding: "6px 4px" },
 };
