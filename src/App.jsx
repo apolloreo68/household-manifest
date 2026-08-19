@@ -9,6 +9,9 @@ import {
 import { db, auth } from "./firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { DndContext, PointerSensor, TouchSensor, useSensor, useSensors, closestCenter } from "@dnd-kit/core";
+import { SortableContext, useSortable, rectSortingStrategy, arrayMove } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 // All family data lives in a single Firestore document. Every device that
 // has this app open gets pushed live updates via onSnapshot.
@@ -290,21 +293,76 @@ export default function App() {
       if (oldName !== undefined) {
         return {
           ...d,
-          categories: d.categories.map((c) => (c === oldName ? name : c)),
+          categories: d.categories.map((c) => (c.name === oldName ? { ...c, name } : c)),
           items: d.items.map((it) => (it.category === oldName ? { ...it, category: name } : it)),
         };
       }
-      if (d.categories.includes(name)) return d;
-      return { ...d, categories: [...d.categories, name] };
+      if (d.categories.some((c) => c.name === name)) return d;
+      return { ...d, categories: [...d.categories, { name, subcategories: [] }] };
     });
   };
   const deleteCategory = (name) => {
     setData((d) => ({
       ...d,
-      categories: d.categories.filter((c) => c !== name),
-      items: d.items.map((it) => (it.category === name ? { ...it, category: "" } : it)),
+      categories: d.categories.filter((c) => c.name !== name),
+      items: d.items.map((it) => (it.category === name ? { ...it, category: "", subcategory: "" } : it)),
     }));
     if (selectedCategory === name) pushView(selectedPropertyId ? { view: "property", selectedPropertyId } : { view: "home" });
+  };
+
+  const saveSubcategory = (parentName, subName, oldSubName) => {
+    setData((d) => ({
+      ...d,
+      categories: d.categories.map((c) => {
+        if (c.name !== parentName) return c;
+        const subs = c.subcategories || [];
+        if (oldSubName !== undefined) {
+          return { ...c, subcategories: subs.map((s) => (s === oldSubName ? subName : s)) };
+        }
+        if (subs.includes(subName)) return c;
+        return { ...c, subcategories: [...subs, subName] };
+      }),
+      items: oldSubName !== undefined
+        ? d.items.map((it) => (it.category === parentName && it.subcategory === oldSubName ? { ...it, subcategory: subName } : it))
+        : d.items,
+    }));
+  };
+  const deleteSubcategory = (parentName, subName) => {
+    setData((d) => ({
+      ...d,
+      categories: d.categories.map((c) => (
+        c.name === parentName ? { ...c, subcategories: (c.subcategories || []).filter((s) => s !== subName) } : c
+      )),
+      items: d.items.map((it) => (
+        it.category === parentName && it.subcategory === subName ? { ...it, subcategory: "" } : it
+      )),
+    }));
+  };
+
+  // Drag-and-drop reordering: houses and storage spots are reordered within
+  // their own subset of the properties array (dragging a house never moves a
+  // storage entry), categories reorder directly.
+  const reorderProperties = (type, activeId, overId) => {
+    if (activeId === overId) return;
+    setData((d) => {
+      const subset = d.properties.filter((p) => p.type === type);
+      const oldIndex = subset.findIndex((p) => p.id === activeId);
+      const newIndex = subset.findIndex((p) => p.id === overId);
+      if (oldIndex === -1 || newIndex === -1) return d;
+      const reordered = arrayMove(subset, oldIndex, newIndex);
+      let ptr = 0;
+      const newProperties = d.properties.map((p) => (p.type === type ? reordered[ptr++] : p));
+      return { ...d, properties: newProperties };
+    });
+  };
+  const reorderCategories = (activeName, overName) => {
+    if (activeName === overName) return;
+    setData((d) => {
+      const oldIndex = d.categories.findIndex((c) => c.name === activeName);
+      const newIndex = d.categories.findIndex((c) => c.name === overName);
+      if (oldIndex === -1 || newIndex === -1) return d;
+      return { ...d, categories: arrayMove(d.categories, oldIndex, newIndex) };
+    });
   };
 
   const savePerson = (name, id) => {
@@ -317,14 +375,24 @@ export default function App() {
     setData((d) => ({
       ...d,
       people: d.people.filter((p) => p.id !== id),
-      items: d.items.map((it) => (it.holderId === id ? { ...it, holderId: null } : it)),
+      items: d.items.map((it) => (
+        it.loanedTo === id ? { ...it, status: "storage", loanedTo: null } : it
+      )),
     }));
   };
 
   const upsertItem = (item) => {
     setData((d) => ({
       ...d,
-      categories: item.category && !d.categories.includes(item.category) ? [...d.categories, item.category] : d.categories,
+      categories: item.category && !d.categories.some((c) => c.name === item.category)
+        ? [...d.categories, { name: item.category, subcategories: item.subcategory ? [item.subcategory] : [] }]
+        : (item.category && item.subcategory
+          ? d.categories.map((c) => (
+              c.name === item.category && !(c.subcategories || []).includes(item.subcategory)
+                ? { ...c, subcategories: [...(c.subcategories || []), item.subcategory] }
+                : c
+            ))
+          : d.categories),
       items: d.items.some((it) => it.id === item.id) ? d.items.map((it) => (it.id === item.id ? item : it)) : [...d.items, item],
     }));
   };
@@ -433,9 +501,7 @@ export default function App() {
           <SearchResultsView
             results={homeSearchResults}
             propertyName={propertyName}
-            personName={personName}
-            onEdit={(it) => setItemModal({ mode: "edit", item: it })}
-            onDelete={(it) => setConfirmDelete({ type: "item", id: it.id, label: it.name })}
+            onOpenItem={(it) => setItemDetail(it.id)}
           />
         ) : view === "home" ? (
           <HomeView
@@ -449,6 +515,9 @@ export default function App() {
             onDelete={(p) => setConfirmDelete({ type: "property", id: p.id, label: p.name })}
             onAdd={() => setPropertyModal({ mode: "create" })}
             onOpenGlobalCategory={(cat) => pushView({ view: "globalCategory", selectedCategory: cat })}
+            onAddCategory={() => setCategoryModal({ mode: "create" })}
+            onReorderProperties={reorderProperties}
+            onReorderCategories={reorderCategories}
           />
         ) : view === "property" ? (
           <PropertyView
@@ -465,6 +534,7 @@ export default function App() {
           <CategoryView
             property={selectedProperty}
             category={selectedCategory}
+            subcategories={(categories.find((c) => c.name === selectedCategory)?.subcategories) || []}
             items={currentItems}
             personName={personName}
             propertyName={propertyName}
@@ -485,9 +555,13 @@ export default function App() {
       {categoryModal && (
         <CategoryModal
           initial={categoryModal.category}
-          existing={categories}
+          existing={categories.map((c) => c.name)}
+          subcategories={categoryModal.category ? (categories.find((c) => c.name === categoryModal.category)?.subcategories || []) : []}
           onClose={() => setCategoryModal(null)}
           onSave={(name, oldName) => { saveCategory(name, oldName); setCategoryModal(null); }}
+          onAddSubcategory={(sub) => saveSubcategory(categoryModal.category, sub)}
+          onRenameSubcategory={(oldSub, newSub) => saveSubcategory(categoryModal.category, newSub, oldSub)}
+          onDeleteSubcategory={(sub) => deleteSubcategory(categoryModal.category, sub)}
         />
       )}
 
@@ -612,12 +686,22 @@ function Breadcrumb({ property, category, onHome, onProperty }) {
 function HomeView({
   properties, categories,
   itemCountForProperty, itemCountForCategoryGlobal, hasGlobalUncategorized,
-  onOpen, onEdit, onDelete, onAdd, onOpenGlobalCategory,
+  onOpen, onEdit, onDelete, onAdd, onOpenGlobalCategory, onAddCategory,
+  onReorderProperties, onReorderCategories,
 }) {
   const houses = properties.filter((p) => p.type === "house");
   const storage = properties.filter((p) => p.type === "storage");
   const [openSections, setOpenSections] = useState({ houses: false, storage: false, categories: false });
   const toggle = (key) => setOpenSections((s) => ({ ...s, [key]: !s[key] }));
+
+  // Shared drag sensors: a mouse/trackpad drag needs to move a few pixels
+  // before it counts as a drag (so a plain click still opens the tile), and
+  // on touch it needs a brief press-and-hold first, so dragging never fights
+  // with normal page scrolling.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } })
+  );
 
   if (properties.length === 0) {
     return (
@@ -641,13 +725,24 @@ function HomeView({
           open={openSections.houses}
           onToggle={() => toggle("houses")}
         >
-          <TileGrid>
-            {houses.map((p) => (
-              <PropertyTile key={p.id} property={p} colorIndex={properties.indexOf(p)}
-                count={itemCountForProperty(p.id)} onOpen={() => onOpen(p.id)}
-                onEdit={() => onEdit(p)} onDelete={() => onDelete(p)} />
-            ))}
-          </TileGrid>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={(e) => {
+              const { active, over } = e;
+              if (over && active.id !== over.id) onReorderProperties("house", active.id, over.id);
+            }}
+          >
+            <SortableContext items={houses.map((p) => p.id)} strategy={rectSortingStrategy}>
+              <TileGrid>
+                {houses.map((p) => (
+                  <PropertyTile key={p.id} property={p} colorIndex={properties.indexOf(p)}
+                    count={itemCountForProperty(p.id)} onOpen={() => onOpen(p.id)}
+                    onEdit={() => onEdit(p)} onDelete={() => onDelete(p)} />
+                ))}
+              </TileGrid>
+            </SortableContext>
+          </DndContext>
         </CollapsibleSection>
       )}
 
@@ -659,15 +754,30 @@ function HomeView({
           open={openSections.storage}
           onToggle={() => toggle("storage")}
         >
-          <TileGrid>
-            {storage.map((p) => (
-              <PropertyTile key={p.id} property={p} colorIndex={properties.indexOf(p)}
-                count={itemCountForProperty(p.id)} onOpen={() => onOpen(p.id)}
-                onEdit={() => onEdit(p)} onDelete={() => onDelete(p)} />
-            ))}
-          </TileGrid>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={(e) => {
+              const { active, over } = e;
+              if (over && active.id !== over.id) onReorderProperties("storage", active.id, over.id);
+            }}
+          >
+            <SortableContext items={storage.map((p) => p.id)} strategy={rectSortingStrategy}>
+              <TileGrid>
+                {storage.map((p) => (
+                  <PropertyTile key={p.id} property={p} colorIndex={properties.indexOf(p)}
+                    count={itemCountForProperty(p.id)} onOpen={() => onOpen(p.id)}
+                    onEdit={() => onEdit(p)} onDelete={() => onDelete(p)} />
+                ))}
+              </TileGrid>
+            </SortableContext>
+          </DndContext>
         </CollapsibleSection>
       )}
+
+      <button style={styles.addTile} onClick={onAdd}>
+        <Plus size={16} /> Add a property
+      </button>
 
       {(categories.length > 0 || hasGlobalUncategorized) && (
         <CollapsibleSection
@@ -677,34 +787,47 @@ function HomeView({
           open={openSections.categories}
           onToggle={() => toggle("categories")}
         >
-          <div style={styles.pageSubtitle}>See everything in a category, across every property.</div>
-          <TileGrid>
-            {categories.map((cat, i) => {
-              const Icon = categoryIcon(cat);
-              const color = TILE_COLORS[i % TILE_COLORS.length];
-              const count = itemCountForCategoryGlobal(cat);
-              return (
-                <div key={cat} style={styles.tile} onClick={() => onOpenGlobalCategory(cat)}>
-                  <div style={{ ...styles.tileIconWrap, background: color + "22", color }}><Icon size={26} /></div>
-                  <div style={styles.tileName}>{cat}</div>
-                  <div style={styles.tileMeta}>{count} item{count === 1 ? "" : "s"}</div>
-                </div>
-              );
-            })}
-            {hasGlobalUncategorized && (
-              <div style={styles.tile} onClick={() => onOpenGlobalCategory("")}>
-                <div style={{ ...styles.tileIconWrap, background: "#8A857722", color: "#8A8577" }}><Box size={26} /></div>
-                <div style={styles.tileName}>Uncategorized</div>
-                <div style={styles.tileMeta}>{itemCountForCategoryGlobal("")} item{itemCountForCategoryGlobal("") === 1 ? "" : "s"}</div>
-              </div>
-            )}
-          </TileGrid>
+          <div style={styles.pageSubtitle}>See everything in a category, across every property. Press and hold a tile to reorder.</div>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={(e) => {
+              const { active, over } = e;
+              if (over && active.id !== over.id) onReorderCategories(active.id, over.id);
+            }}
+          >
+            <SortableContext items={categories.map((c) => c.name)} strategy={rectSortingStrategy}>
+              <TileGrid>
+                {categories.map((cat, i) => (
+                  <CategoryTile
+                    key={cat.name}
+                    id={cat.name}
+                    name={cat.name}
+                    color={TILE_COLORS[i % TILE_COLORS.length]}
+                    count={itemCountForCategoryGlobal(cat.name)}
+                    onOpen={() => onOpenGlobalCategory(cat.name)}
+                  />
+                ))}
+                {hasGlobalUncategorized && (
+                  <div style={styles.tile} onClick={() => onOpenGlobalCategory("")}>
+                    <div style={{ ...styles.tileIconWrap, background: "#8A857722", color: "#8A8577" }}><Box size={26} /></div>
+                    <div style={styles.tileName}>Uncategorized</div>
+                    <div style={styles.tileMeta}>{itemCountForCategoryGlobal("")} item{itemCountForCategoryGlobal("") === 1 ? "" : "s"}</div>
+                  </div>
+                )}
+              </TileGrid>
+            </SortableContext>
+          </DndContext>
+          <button style={styles.addTile} onClick={onAddCategory}>
+            <Plus size={16} /> Add a category
+          </button>
         </CollapsibleSection>
       )}
-
-      <button style={styles.addTile} onClick={onAdd}>
-        <Plus size={16} /> Add a property
-      </button>
+      {categories.length === 0 && !hasGlobalUncategorized && (
+        <button style={styles.addTile} onClick={onAddCategory}>
+          <Tag size={16} /> Add a category
+        </button>
+      )}
     </div>
   );
 }
@@ -732,8 +855,17 @@ function TileGrid({ children }) {
 function PropertyTile({ property, colorIndex, count, onOpen, onEdit, onDelete }) {
   const color = TILE_COLORS[colorIndex % TILE_COLORS.length];
   const Icon = property.type === "house" ? Home : Warehouse;
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: property.id });
+  const style = {
+    ...styles.tile,
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    zIndex: isDragging ? 10 : 1,
+    touchAction: "none",
+  };
   return (
-    <div style={styles.tile} onClick={onOpen}>
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners} onClick={onOpen}>
       <div style={{ ...styles.tileIconWrap, background: color + "22", color }}>
         <Icon size={26} />
       </div>
@@ -747,6 +879,26 @@ function PropertyTile({ property, colorIndex, count, onOpen, onEdit, onDelete })
   );
 }
 
+function CategoryTile({ id, name, color, count, onOpen }) {
+  const Icon = categoryIcon(name);
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = {
+    ...styles.tile,
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    zIndex: isDragging ? 10 : 1,
+    touchAction: "none",
+  };
+  return (
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners} onClick={onOpen}>
+      <div style={{ ...styles.tileIconWrap, background: color + "22", color }}><Icon size={26} /></div>
+      <div style={styles.tileName}>{name}</div>
+      <div style={styles.tileMeta}>{count} item{count === 1 ? "" : "s"}</div>
+    </div>
+  );
+}
+
 /* ---------- Property view: category grid ---------- */
 function PropertyView({ property, categories, hasUncategorized, itemCountForCategory, onOpenCategory, onEditCategory, onDeleteCategory, onAddCategory }) {
   return (
@@ -755,16 +907,16 @@ function PropertyView({ property, categories, hasUncategorized, itemCountForCate
       <div style={styles.pageSubtitle}>Choose a category to see what's logged there</div>
       <TileGrid>
         {categories.map((cat, i) => {
-          const Icon = categoryIcon(cat);
+          const Icon = categoryIcon(cat.name);
           const color = TILE_COLORS[i % TILE_COLORS.length];
           return (
-            <div key={cat} style={styles.tile} onClick={() => onOpenCategory(cat)}>
+            <div key={cat.name} style={styles.tile} onClick={() => onOpenCategory(cat.name)}>
               <div style={{ ...styles.tileIconWrap, background: color + "22", color }}><Icon size={26} /></div>
-              <div style={styles.tileName}>{cat}</div>
-              <div style={styles.tileMeta}>{itemCountForCategory(cat)} item{itemCountForCategory(cat) === 1 ? "" : "s"}</div>
+              <div style={styles.tileName}>{cat.name}</div>
+              <div style={styles.tileMeta}>{itemCountForCategory(cat.name)} item{itemCountForCategory(cat.name) === 1 ? "" : "s"}</div>
               <div style={styles.tileActions}>
-                <button style={styles.tileIconBtn} onClick={(e) => { e.stopPropagation(); onEditCategory(cat); }}><Edit3 size={13} /></button>
-                <button style={styles.tileIconBtn} onClick={(e) => { e.stopPropagation(); onDeleteCategory(cat); }}><Trash2 size={13} /></button>
+                <button style={styles.tileIconBtn} onClick={(e) => { e.stopPropagation(); onEditCategory(cat.name); }}><Edit3 size={13} /></button>
+                <button style={styles.tileIconBtn} onClick={(e) => { e.stopPropagation(); onDeleteCategory(cat.name); }}><Trash2 size={13} /></button>
               </div>
             </div>
           );
@@ -785,9 +937,12 @@ function PropertyView({ property, categories, hasUncategorized, itemCountForCate
 }
 
 /* ---------- Category view: item list ---------- */
-function CategoryView({ property, category, items, personName, propertyName, onAddItem, onOpenItem }) {
+function CategoryView({ property, category, subcategories, items, personName, propertyName, onAddItem, onOpenItem }) {
   const hasPhotos = items.some((it) => it.photo);
   const [showPhotos, setShowPhotos] = useState(true);
+  const [subFilter, setSubFilter] = useState("");
+
+  const visibleItems = subFilter ? items.filter((it) => (it.subcategory || "") === subFilter) : items;
 
   return (
     <div>
@@ -795,7 +950,7 @@ function CategoryView({ property, category, items, personName, propertyName, onA
         <div>
           <h1 style={styles.pageTitle}>{category || "Uncategorized"}</h1>
           <div style={styles.pageSubtitle}>
-            {property ? property.name : "All properties"} · {items.length} item{items.length === 1 ? "" : "s"}
+            {property ? property.name : "All properties"} · {visibleItems.length} item{visibleItems.length === 1 ? "" : "s"}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -808,7 +963,28 @@ function CategoryView({ property, category, items, personName, propertyName, onA
           <button style={styles.primaryBtn} onClick={onAddItem}><Plus size={16} /> Log item</button>
         </div>
       </div>
-      {items.length === 0 ? (
+
+      {subcategories && subcategories.length > 0 && (
+        <div style={styles.subFilterRow}>
+          <button
+            style={{ ...styles.subFilterChip, ...(subFilter === "" ? styles.subFilterChipActive : {}) }}
+            onClick={() => setSubFilter("")}
+          >
+            All
+          </button>
+          {subcategories.map((s) => (
+            <button
+              key={s}
+              style={{ ...styles.subFilterChip, ...(subFilter === s ? styles.subFilterChipActive : {}) }}
+              onClick={() => setSubFilter(s)}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {visibleItems.length === 0 ? (
         <EmptyState
           icon={<Package size={30} color="#A67C3D" />}
           title="Nothing logged here yet"
@@ -818,7 +994,7 @@ function CategoryView({ property, category, items, personName, propertyName, onA
         />
       ) : (
         <div style={styles.itemTileGrid}>
-          {items.map((it) => (
+          {visibleItems.map((it) => (
             <ItemCompactTile
               key={it.id}
               item={it}
@@ -845,18 +1021,22 @@ function ItemCompactTile({ item, showPhoto, locationLabel, onClick }) {
 }
 
 /* ---------- Search results (home) ---------- */
-function SearchResultsView({ results, propertyName, personName, onEdit, onDelete }) {
+function SearchResultsView({ results, propertyName, onOpenItem }) {
   return (
     <div>
       <div style={styles.pageSubtitle}>{results.length} result{results.length === 1 ? "" : "s"}</div>
       {results.length === 0 ? (
         <EmptyState icon={<Search size={26} color="#A67C3D" />} title="No matches" body="Try a different search term or clear the filter." />
       ) : (
-        <div style={{ ...styles.cardGrid, marginTop: 14 }}>
+        <div style={{ ...styles.itemTileGrid, marginTop: 14 }}>
           {results.map((it) => (
-            <ItemTag key={it.id} item={it} holderName={personName(it.holderId)}
+            <ItemCompactTile
+              key={it.id}
+              item={it}
+              showPhoto
               locationLabel={propertyName(it.propertyId)}
-              onEdit={() => onEdit(it)} onDelete={() => onDelete(it)} />
+              onClick={() => onOpenItem(it)}
+            />
           ))}
         </div>
       )}
@@ -864,50 +1044,13 @@ function SearchResultsView({ results, propertyName, personName, onEdit, onDelete
   );
 }
 
-/* ---------- Item tag card ---------- */
-function ItemTag({ item, holderName, locationLabel, showPhoto = true, onEdit, onDelete }) {
-  const displayPhoto = showPhoto && !!item.photo;
-  return (
-    <div style={styles.tagCard}>
-      {displayPhoto && (
-        <img src={item.photo} alt={item.name} style={styles.tagPhoto} />
-      )}
-      {!displayPhoto && <div style={styles.tagHole} />}
-      <div style={displayPhoto ? { ...styles.tagBody, paddingLeft: 14 } : styles.tagBody}>
-        <div style={styles.tagTopRow}>
-          <span style={styles.tagName}>{item.name}</span>
-          <div style={styles.tagActions}>
-            <button style={styles.iconBtn} onClick={onEdit} title="Edit"><Edit3 size={13} /></button>
-            <button style={styles.iconBtn} onClick={onDelete} title="Remove"><Trash2 size={13} /></button>
-          </div>
-        </div>
-        {locationLabel && (
-          <div style={styles.tagCategory}><Tag size={11} /> {locationLabel}{item.category ? ` · ${item.category}` : ""}</div>
-        )}
-        {item.customFields?.length > 0 && (
-          <div style={styles.customFieldList}>
-            {item.customFields.map((f, i) => f.key ? (
-              <div key={i} style={styles.customField}>
-                <span style={styles.customFieldKey}>{f.key}</span>
-                <span style={styles.customFieldVal}>{f.value}</span>
-              </div>
-            ) : null)}
-          </div>
-        )}
-        {item.notes && <div style={styles.tagNotes}>{item.notes}</div>}
-        <div style={styles.tagPerforation} />
-        <div style={styles.tagStub}>
-          <div style={styles.tagStubRow}><User size={12} /><span>{holderName || "In storage"}</span></div>
-          <div style={styles.tagQty}>Qty: {item.quantity || 1}</div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /* ---------- Item detail popup ---------- */
 function ItemDetailModal({ item, propertyName, personName, showLocation, onClose, onEdit, onDelete }) {
   if (!item) return null;
+  const statusLabel = item.status === "in_use" ? "In use"
+    : item.status === "loan" ? `On loan to ${personName(item.loanedTo) || "someone"}`
+    : "In storage";
   return (
     <ModalShell onClose={onClose} title={item.name} width={460}>
       <div style={styles.formGrid}>
@@ -918,8 +1061,8 @@ function ItemDetailModal({ item, propertyName, personName, showLocation, onClose
           <span style={styles.detailValue}>{item.quantity || 1}</span>
         </div>
         <div style={styles.detailRow}>
-          <span style={styles.detailLabel}>In the possession of</span>
-          <span style={styles.detailValue}>{personName(item.holderId) || "In storage"}</span>
+          <span style={styles.detailLabel}>Status</span>
+          <span style={styles.detailValue}>{statusLabel}</span>
         </div>
         {showLocation && (
           <div style={styles.detailRow}>
@@ -929,7 +1072,9 @@ function ItemDetailModal({ item, propertyName, personName, showLocation, onClose
         )}
         <div style={styles.detailRow}>
           <span style={styles.detailLabel}>Category</span>
-          <span style={styles.detailValue}>{item.category || "Uncategorized"}</span>
+          <span style={styles.detailValue}>
+            {item.category || "Uncategorized"}{item.subcategory ? ` › ${item.subcategory}` : ""}
+          </span>
         </div>
 
         {item.customFields?.length > 0 && (
@@ -966,20 +1111,39 @@ function ItemDetailModal({ item, propertyName, personName, showLocation, onClose
 function TaskModal({ task, presetPersonId, people, properties, items, propertyName, onClose, onSave }) {
   const [personId, setPersonId] = useState(task?.personId || presetPersonId || people[0]?.id || "");
   const [destinationPropertyId, setDestinationPropertyId] = useState(task?.destinationPropertyId || properties[0]?.id || "");
+  const [sourcePropertyId, setSourcePropertyId] = useState("");
   const [itemIds, setItemIds] = useState(task?.itemIds || []);
   const [notes, setNotes] = useState(task?.notes || "");
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
+  const [expandedGroups, setExpandedGroups] = useState({});
 
   const candidateItems = useMemo(() => {
     return items
       .filter((it) => it.propertyId !== destinationPropertyId || itemIds.includes(it.id))
+      .filter((it) => !sourcePropertyId || it.propertyId === sourcePropertyId || itemIds.includes(it.id))
       .filter((it) => !search.trim() || it.name.toLowerCase().includes(search.trim().toLowerCase()));
-  }, [items, destinationPropertyId, itemIds, search]);
+  }, [items, destinationPropertyId, sourcePropertyId, itemIds, search]);
+
+  // Group candidate items as property -> category -> items, so the picker
+  // matches the same drill-down shape as the rest of the app.
+  const grouped = useMemo(() => {
+    const byProperty = {};
+    for (const it of candidateItems) {
+      const propId = it.propertyId;
+      if (!byProperty[propId]) byProperty[propId] = { propertyId: propId, categories: {} };
+      const catName = it.category || "Uncategorized";
+      if (!byProperty[propId].categories[catName]) byProperty[propId].categories[catName] = [];
+      byProperty[propId].categories[catName].push(it);
+    }
+    return Object.values(byProperty).sort((a, b) => propertyName(a.propertyId).localeCompare(propertyName(b.propertyId)));
+  }, [candidateItems, propertyName]);
 
   const toggleItem = (id) => {
     setItemIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
   };
+  const toggleGroup = (key) => setExpandedGroups((g) => ({ ...g, [key]: !g[key] }));
+  const isExpanded = (key) => (search.trim() ? true : !!expandedGroups[key]);
 
   const handleSave = () => {
     if (!personId) return setError("Choose who this is assigned to.");
@@ -999,10 +1163,10 @@ function TaskModal({ task, presetPersonId, people, properties, items, propertyNa
     <ModalShell onClose={onClose} title={task ? "Edit move task" : "Assign a move task"} width={540}>
       <div style={styles.formGrid}>
         <div style={styles.formRow2}>
-          <Field label="Assign to">
-            <select style={styles.input} value={personId} onChange={(e) => setPersonId(e.target.value)}>
-              {people.length === 0 && <option value="">Add a person first</option>}
-              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          <Field label="Move from">
+            <select style={styles.input} value={sourcePropertyId} onChange={(e) => setSourcePropertyId(e.target.value)}>
+              <option value="">Any property</option>
+              {properties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           </Field>
           <Field label="Move to">
@@ -1012,6 +1176,13 @@ function TaskModal({ task, presetPersonId, people, properties, items, propertyNa
           </Field>
         </div>
 
+        <Field label="Assign to">
+          <select style={styles.input} value={personId} onChange={(e) => setPersonId(e.target.value)}>
+            {people.length === 0 && <option value="">Add a person first</option>}
+            {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+
         <Field label={`Items to move (${itemIds.length} selected)`}>
           <input
             style={{ ...styles.input, marginBottom: 6 }}
@@ -1020,16 +1191,40 @@ function TaskModal({ task, presetPersonId, people, properties, items, propertyNa
             onChange={(e) => setSearch(e.target.value)}
           />
           <div style={styles.taskItemPicker}>
-            {candidateItems.length === 0 && (
+            {grouped.length === 0 && (
               <div style={{ fontSize: 12.5, color: MUTED, padding: "8px 4px" }}>No matching items.</div>
             )}
-            {candidateItems.map((it) => (
-              <label key={it.id} style={styles.taskItemPickerRow}>
-                <input type="checkbox" checked={itemIds.includes(it.id)} onChange={() => toggleItem(it.id)} />
-                <span style={{ flex: 1 }}>{it.name}</span>
-                <span style={styles.taskItemPickerLocation}>{propertyName(it.propertyId)}</span>
-              </label>
-            ))}
+            {grouped.map((propGroup) => {
+              const propKey = propGroup.propertyId;
+              const propItemCount = Object.values(propGroup.categories).flat().length;
+              return (
+                <div key={propKey} style={styles.taskGroupProperty}>
+                  <button type="button" style={styles.taskGroupBar} onClick={() => toggleGroup(propKey)}>
+                    {isExpanded(propKey) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    <span style={{ fontWeight: 600, flex: 1, textAlign: "left" }}>{propertyName(propKey)}</span>
+                    <span style={styles.taskItemPickerLocation}>{propItemCount}</span>
+                  </button>
+                  {isExpanded(propKey) && Object.entries(propGroup.categories).map(([catName, catItems]) => {
+                    const catKey = `${propKey}::${catName}`;
+                    return (
+                      <div key={catKey} style={styles.taskGroupCategory}>
+                        <button type="button" style={styles.taskGroupBarSmall} onClick={() => toggleGroup(catKey)}>
+                          {isExpanded(catKey) ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                          <span style={{ flex: 1, textAlign: "left" }}>{catName}</span>
+                          <span style={styles.taskItemPickerLocation}>{catItems.length}</span>
+                        </button>
+                        {isExpanded(catKey) && catItems.map((it) => (
+                          <label key={it.id} style={{ ...styles.taskItemPickerRow, paddingLeft: 30 }}>
+                            <input type="checkbox" checked={itemIds.includes(it.id)} onChange={() => toggleItem(it.id)} />
+                            <span style={{ flex: 1 }}>{it.name}</span>
+                          </label>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
           </div>
         </Field>
 
@@ -1109,7 +1304,11 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
   const [category, setCategory] = useState(item?.category ?? defaultCategory ?? "");
   const [newCategory, setNewCategory] = useState("");
   const [addingCategory, setAddingCategory] = useState(false);
-  const [holderId, setHolderId] = useState(item?.holderId ?? "");
+  const [subcategory, setSubcategory] = useState(item?.subcategory || "");
+  const [newSubcategory, setNewSubcategory] = useState("");
+  const [addingSubcategory, setAddingSubcategory] = useState(false);
+  const [status, setStatus] = useState(item?.status || "storage"); // 'in_use' | 'storage' | 'loan'
+  const [loanedTo, setLoanedTo] = useState(item?.loanedTo || "");
   const [quantity, setQuantity] = useState(item?.quantity ?? 1);
   const [notes, setNotes] = useState(item?.notes || "");
   const [customFields, setCustomFields] = useState(item?.customFields?.length ? item.customFields : [{ key: "", value: "" }]);
@@ -1117,6 +1316,9 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
   const [photoBusy, setPhotoBusy] = useState(false);
   const [error, setError] = useState("");
   const fileInputRef = useRef(null);
+
+  const currentCategoryObj = categories.find((c) => c.name === category);
+  const availableSubcategories = currentCategoryObj?.subcategories || [];
 
   const updateField = (i, key, value) => setCustomFields((f) => f.map((row, idx) => (idx === i ? { ...row, [key]: value } : row)));
   const addFieldRow = () => setCustomFields((f) => [...f, { key: "", value: "" }]);
@@ -1146,13 +1348,18 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
     if (!name.trim()) return setError("Give the item a name.");
     if (!propertyId) return setError("Choose a property.");
     if (addingCategory && !newCategory.trim()) return setError("Type a name for the new category, or cancel it.");
+    if (addingSubcategory && !newSubcategory.trim()) return setError("Type a name for the new subcategory, or cancel it.");
+    if (status === "loan" && !loanedTo) return setError("Choose who it's on loan to.");
     const finalCategory = addingCategory ? newCategory.trim() : category;
+    const finalSubcategory = addingCategory ? "" : (addingSubcategory ? newSubcategory.trim() : subcategory);
     onSave({
       id: item?.id || uid(),
       name: name.trim(),
       propertyId,
       category: finalCategory,
-      holderId: holderId || null,
+      subcategory: finalSubcategory,
+      status,
+      loanedTo: status === "loan" ? loanedTo : null,
       quantity: Math.max(1, Number(quantity) || 1),
       notes: notes.trim(),
       photo: photo || null,
@@ -1211,10 +1418,10 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
             {!addingCategory ? (
               <select style={styles.input} value={category} onChange={(e) => {
                 if (e.target.value === "__new__") { setAddingCategory(true); }
-                else setCategory(e.target.value);
+                else { setCategory(e.target.value); setSubcategory(""); }
               }}>
                 <option value="">Uncategorized</option>
-                {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+                {categories.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
                 <option value="__new__">+ New category…</option>
               </select>
             ) : (
@@ -1227,12 +1434,43 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
           </Field>
         </div>
 
-        <Field label="In the possession of">
-          <select style={styles.input} value={holderId} onChange={(e) => setHolderId(e.target.value)}>
-            <option value="">— In storage, no one —</option>
-            {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+        {category && !addingCategory && (
+          <Field label="Subcategory (optional)">
+            {!addingSubcategory ? (
+              <select style={styles.input} value={subcategory} onChange={(e) => {
+                if (e.target.value === "__new__") { setAddingSubcategory(true); }
+                else setSubcategory(e.target.value);
+              }}>
+                <option value="">None</option>
+                {availableSubcategories.map((s) => <option key={s} value={s}>{s}</option>)}
+                <option value="__new__">+ New subcategory…</option>
+              </select>
+            ) : (
+              <div style={{ display: "flex", gap: 6 }}>
+                <input style={styles.input} value={newSubcategory} onChange={(e) => setNewSubcategory(e.target.value)}
+                  placeholder="New subcategory name" autoFocus />
+                <button style={styles.iconBtn} onClick={() => { setAddingSubcategory(false); setNewSubcategory(""); }}><X size={14} /></button>
+              </div>
+            )}
+          </Field>
+        )}
+
+        <Field label="Status">
+          <div style={{ display: "flex", gap: 8 }}>
+            <StatusToggle active={status === "storage"} label="In storage" onClick={() => setStatus("storage")} />
+            <StatusToggle active={status === "in_use"} label="In use" onClick={() => setStatus("in_use")} />
+            <StatusToggle active={status === "loan"} label="On loan" onClick={() => setStatus("loan")} />
+          </div>
         </Field>
+
+        {status === "loan" && (
+          <Field label="Loaned to">
+            <select style={styles.input} value={loanedTo} onChange={(e) => setLoanedTo(e.target.value)}>
+              <option value="">— Choose a person —</option>
+              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </Field>
+        )}
 
         <Field label="Notes">
           <textarea style={{ ...styles.input, minHeight: 56, resize: "vertical" }} value={notes}
@@ -1302,12 +1540,28 @@ function TypeToggle({ active, icon, label, onClick }) {
   );
 }
 
+function StatusToggle({ active, label, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{ ...styles.typeToggle, flex: 1, justifyContent: "center", ...(active ? styles.typeToggleActive : {}) }}
+    >
+      {label}
+    </button>
+  );
+}
+
 /* ---------- Category modal ---------- */
-function CategoryModal({ initial, existing, onClose, onSave }) {
+function CategoryModal({ initial, existing, subcategories, onClose, onSave, onAddSubcategory, onRenameSubcategory, onDeleteSubcategory }) {
   const [name, setName] = useState(initial || "");
   const [error, setError] = useState("");
+  const [newSub, setNewSub] = useState("");
+  const [editingSub, setEditingSub] = useState(null);
+  const [editingSubName, setEditingSubName] = useState("");
+
   return (
-    <ModalShell onClose={onClose} title={initial !== undefined ? "Rename category" : "Add a category"} width={400}>
+    <ModalShell onClose={onClose} title={initial !== undefined ? "Edit category" : "Add a category"} width={420}>
       <div style={styles.formGrid}>
         <Field label="Category name">
           <input style={styles.input} value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder="e.g. Furniture" />
@@ -1322,6 +1576,53 @@ function CategoryModal({ initial, existing, onClose, onSave }) {
             onSave(trimmed, initial);
           }}><Check size={15} /> Save</button>
         </div>
+
+        {initial !== undefined && (
+          <div style={{ borderTop: `1px solid ${BORDER}`, paddingTop: 14, marginTop: 4 }}>
+            <div style={styles.fieldLabel}>Subcategories</div>
+            <div style={{ fontSize: 12, color: MUTED, marginBottom: 8 }}>
+              e.g. Kitchen could break down into Dishes, Flatware, Glasses.
+            </div>
+            <div style={styles.manageList}>
+              {(subcategories || []).map((sub) => (
+                <div key={sub} style={styles.manageItemRow}>
+                  {editingSub === sub ? (
+                    <>
+                      <input style={{ ...styles.input, flex: 1 }} value={editingSubName} onChange={(e) => setEditingSubName(e.target.value)} autoFocus />
+                      <button style={styles.iconBtn} onClick={() => {
+                        const trimmed = editingSubName.trim();
+                        if (trimmed) onRenameSubcategory(sub, trimmed);
+                        setEditingSub(null);
+                      }}><Check size={14} /></button>
+                      <button style={styles.iconBtn} onClick={() => setEditingSub(null)}><X size={14} /></button>
+                    </>
+                  ) : (
+                    <>
+                      <span>{sub}</span>
+                      <div style={{ display: "flex", gap: 2 }}>
+                        <button style={styles.iconBtn} onClick={() => { setEditingSub(sub); setEditingSubName(sub); }}><Edit3 size={13} /></button>
+                        <button style={styles.iconBtn} onClick={() => onDeleteSubcategory(sub)}><Trash2 size={13} /></button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ))}
+              {(subcategories || []).length === 0 && <div style={styles.sidebarEmpty}>None yet.</div>}
+            </div>
+            <div style={styles.addRow}>
+              <input
+                style={{ ...styles.input, flex: 1 }}
+                placeholder="New subcategory"
+                value={newSub}
+                onChange={(e) => setNewSub(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && newSub.trim()) { onAddSubcategory(newSub.trim()); setNewSub(""); } }}
+              />
+              <button style={styles.secondaryBtn} onClick={() => { if (newSub.trim()) { onAddSubcategory(newSub.trim()); setNewSub(""); } }}>
+                <Plus size={14} /> Add
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </ModalShell>
   );
@@ -1686,6 +1987,16 @@ const styles = {
     borderBottom: `1px solid ${BORDER}`, cursor: "pointer",
   },
   taskItemPickerLocation: { fontSize: 11, color: MUTED, fontFamily: FONT_MONO, whiteSpace: "nowrap" },
+  taskGroupProperty: { borderBottom: `1px solid ${BORDER}` },
+  taskGroupBar: {
+    display: "flex", alignItems: "center", gap: 8, width: "100%", background: PAPER_DARK,
+    border: "none", padding: "8px 10px", fontSize: 13, color: TEXT, cursor: "pointer",
+  },
+  taskGroupCategory: {},
+  taskGroupBarSmall: {
+    display: "flex", alignItems: "center", gap: 8, width: "100%", background: "#fff",
+    border: "none", padding: "6px 10px 6px 22px", fontSize: 12.5, color: TEXT, cursor: "pointer",
+  },
   tileGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 },
   tile: {
     position: "relative", background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 3,
@@ -1702,6 +2013,12 @@ const styles = {
   },
 
   itemListHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 10, marginBottom: 16 },
+  subFilterRow: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 },
+  subFilterChip: {
+    background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 20, padding: "5px 12px",
+    fontSize: 12, color: TEXT, cursor: "pointer",
+  },
+  subFilterChipActive: { background: INK, color: "#F2EFE6", borderColor: INK },
   cardGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 14 },
 
   itemTileGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(108px, 1fr))", gap: 10 },
