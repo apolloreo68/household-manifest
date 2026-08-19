@@ -433,7 +433,6 @@ export default function App() {
           categories={categories}
           defaultPropertyId={selectedPropertyId}
           defaultCategory={view === "category" ? selectedCategory : ""}
-          defaultHolderId={myPersonId}
           onClose={() => setItemModal(null)}
           onSave={(item) => { upsertItem(item); setItemModal(null); }}
         />
@@ -718,13 +717,13 @@ function EmptyState({ icon, title, body, actionLabel, onAction }) {
 }
 
 /* ---------- Item form modal ---------- */
-function ItemFormModal({ item, properties, people, categories, defaultPropertyId, defaultCategory, defaultHolderId, onClose, onSave }) {
+function ItemFormModal({ item, properties, people, categories, defaultPropertyId, defaultCategory, onClose, onSave }) {
   const [name, setName] = useState(item?.name || "");
   const [propertyId, setPropertyId] = useState(item?.propertyId || defaultPropertyId || properties[0]?.id || "");
   const [category, setCategory] = useState(item?.category ?? defaultCategory ?? "");
   const [newCategory, setNewCategory] = useState("");
   const [addingCategory, setAddingCategory] = useState(false);
-  const [holderId, setHolderId] = useState(item?.holderId ?? defaultHolderId ?? "");
+  const [holderId, setHolderId] = useState(item?.holderId ?? "");
   const [quantity, setQuantity] = useState(item?.quantity ?? 1);
   const [notes, setNotes] = useState(item?.notes || "");
   const [customFields, setCustomFields] = useState(item?.customFields?.length ? item.customFields : [{ key: "", value: "" }]);
