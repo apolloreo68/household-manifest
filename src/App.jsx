@@ -1,11 +1,13 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Home, Warehouse, Plus, X, Search, User, Package, Sofa, Palette,
   UtensilsCrossed, Dumbbell, Shirt, BookOpen, Tv, Wrench, Box,
-  Trash2, Edit3, Tag, Loader2, AlertCircle, Check
+  Trash2, Edit3, Tag, Loader2, AlertCircle, Check, Camera, Download,
+  LogOut, Mail, Lock
 } from "lucide-react";
-import { db } from "./firebase";
+import { db, auth } from "./firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 
 // All family data lives in a single Firestore document. Every device that
 // has this app open gets pushed live updates via onSnapshot.
@@ -29,6 +31,58 @@ function categoryIcon(name = "") {
   return Package;
 }
 
+// Shrinks a photo down before it's stored, since Firestore documents have a
+// size limit and we're keeping everything in one document. Resizes to a max
+// width and re-encodes as a compressed JPEG.
+function compressImageFile(file, maxWidth = 640, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read file"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Could not read image"));
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function csvEscape(value) {
+  const s = String(value ?? "");
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function downloadItemsAsCsv(items, propertyName, personName, filename) {
+  const header = ["Item", "Quantity", "Property", "Category", "In possession of", "Notes"];
+  const rows = items.map((it) => [
+    it.name,
+    it.quantity || 1,
+    propertyName(it.propertyId),
+    it.category || "Uncategorized",
+    personName(it.holderId) || "In storage",
+    it.notes || "",
+  ]);
+  const csv = [header, ...rows].map((row) => row.map(csvEscape).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 function useDebouncedSave(data, ready) {
   useEffect(() => {
     if (!ready) return;
@@ -40,6 +94,9 @@ function useDebouncedSave(data, ready) {
 }
 
 export default function App() {
+  const [authUser, setAuthUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
   const [data, setData] = useState(emptyData());
   const [ready, setReady] = useState(false);
 
@@ -50,16 +107,27 @@ export default function App() {
 
   const [homeSearch, setHomeSearch] = useState("");
   const [personFilter, setPersonFilter] = useState("");
+  const [homeCategoryFilter, setHomeCategoryFilter] = useState("");
 
   const [propertyModal, setPropertyModal] = useState(null); // { mode:'create'|'edit', property? }
   const [categoryModal, setCategoryModal] = useState(null); // { mode, category? }
   const [peopleModal, setPeopleModal] = useState(false);
   const [itemModal, setItemModal] = useState(null); // { mode, item? }
   const [confirmDelete, setConfirmDelete] = useState(null); // { type, id, label }
+  const [whoAreYouOpen, setWhoAreYouOpen] = useState(false);
 
   useEffect(() => {
-    // Live-syncs with Firestore: every family member's device that has this
-    // app open will see changes from everyone else within a second or two.
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setAuthUser(u);
+      setAuthChecked(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    // Only listen once someone's signed in — the security rules require it,
+    // and there's no point paying for a listener nobody's allowed to read.
+    if (!authUser) { setReady(false); return; }
     const unsubscribe = onSnapshot(
       MANIFEST_DOC,
       (snap) => {
@@ -72,14 +140,28 @@ export default function App() {
       }
     );
     return () => unsubscribe();
-  }, []);
+  }, [authUser]);
 
-  useDebouncedSave(data, ready);
+  useDebouncedSave(data, ready && !!authUser);
 
   const properties = data.properties;
   const people = data.people;
   const categories = data.categories;
   const items = data.items;
+  const userLinks = data.userLinks || {}; // { [firebase uid]: personId }
+  const myPersonId = authUser ? userLinks[authUser.uid] : null;
+
+  useEffect(() => {
+    // Ask "which family member are you?" once per account, after data has
+    // loaded, if this signed-in account isn't linked to anyone yet.
+    if (ready && authUser && !myPersonId) setWhoAreYouOpen(true);
+  }, [ready, authUser, myPersonId]);
+
+  const linkMeToPerson = (personId) => {
+    if (!authUser) return;
+    setData((d) => ({ ...d, userLinks: { ...(d.userLinks || {}), [authUser.uid]: personId } }));
+    setWhoAreYouOpen(false);
+  };
 
   const selectedProperty = properties.find((p) => p.id === selectedPropertyId) || null;
 
@@ -101,10 +183,11 @@ export default function App() {
   }, [items, view, selectedPropertyId, selectedCategory]);
 
   const homeSearchResults = useMemo(() => {
-    if (!homeSearch.trim() && !personFilter) return null;
+    if (!homeSearch.trim() && !personFilter && !homeCategoryFilter) return null;
     const q = homeSearch.trim().toLowerCase();
     return items.filter((it) => {
       if (personFilter && it.holderId !== personFilter) return false;
+      if (homeCategoryFilter && (it.category || "") !== homeCategoryFilter) return false;
       if (q) {
         const hay = [it.name, it.category, it.notes, ...(it.customFields || []).flatMap((f) => [f.key, f.value])]
           .join(" ").toLowerCase();
@@ -112,7 +195,7 @@ export default function App() {
       }
       return true;
     });
-  }, [items, homeSearch, personFilter]);
+  }, [items, homeSearch, personFilter, homeCategoryFilter]);
 
   const personName = (id) => people.find((p) => p.id === id)?.name || null;
   const propertyName = (id) => properties.find((p) => p.id === id)?.name || "Unknown";
@@ -178,11 +261,30 @@ export default function App() {
   };
   const deleteItem = (id) => setData((d) => ({ ...d, items: d.items.filter((it) => it.id !== id) }));
 
+  if (!authChecked) {
+    return (
+      <div style={styles.loadingScreen}>
+        <GlobalStyle />
+        <Loader2 className="spin" size={28} color="#A67C3D" />
+        <div style={{ marginTop: 12, fontFamily: FONT_BODY, color: "#8A8577" }}>Checking your sign-in…</div>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return (
+      <div style={styles.app}>
+        <GlobalStyle />
+        <LoginScreen />
+      </div>
+    );
+  }
+
   if (!ready) {
     return (
       <div style={styles.loadingScreen}>
+        <GlobalStyle />
         <Loader2 className="spin" size={28} color="#A67C3D" />
-        <style>{`.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}`}</style>
         <div style={{ marginTop: 12, fontFamily: FONT_BODY, color: "#8A8577" }}>Opening the manifest…</div>
       </div>
     );
@@ -225,8 +327,31 @@ export default function App() {
               {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           )}
+          {view === "home" && (
+            <select style={styles.filterSelect} value={homeCategoryFilter} onChange={(e) => setHomeCategoryFilter(e.target.value)}>
+              <option value="">All categories</option>
+              {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          )}
+          {view === "home" && items.length > 0 && (
+            <button
+              style={styles.secondaryBtn}
+              onClick={() => downloadItemsAsCsv(
+                homeSearchResults || items,
+                propertyName,
+                personName,
+                "household-manifest.csv"
+              )}
+              title="Download the current list as a spreadsheet file"
+            >
+              <Download size={14} /> Export CSV
+            </button>
+          )}
           <button style={styles.secondaryBtn} onClick={() => setPeopleModal(true)}>
             <User size={14} /> People
+          </button>
+          <button style={styles.secondaryBtn} onClick={() => signOut(auth)} title="Sign out">
+            <LogOut size={14} />
           </button>
         </div>
       </header>
@@ -266,6 +391,7 @@ export default function App() {
             category={selectedCategory}
             items={currentItems}
             personName={personName}
+            propertyName={propertyName}
             onAddItem={() => setItemModal({ mode: "create" })}
             onEditItem={(it) => setItemModal({ mode: "edit", item: it })}
             onDeleteItem={(it) => setConfirmDelete({ type: "item", id: it.id, label: it.name })}
@@ -307,6 +433,7 @@ export default function App() {
           categories={categories}
           defaultPropertyId={selectedPropertyId}
           defaultCategory={view === "category" ? selectedCategory : ""}
+          defaultHolderId={myPersonId}
           onClose={() => setItemModal(null)}
           onSave={(item) => { upsertItem(item); setItemModal(null); }}
         />
@@ -323,6 +450,20 @@ export default function App() {
             if (confirmDelete.type === "item") deleteItem(confirmDelete.id);
             setConfirmDelete(null);
           }}
+        />
+      )}
+
+      {whoAreYouOpen && (
+        <WhoAreYouModal
+          people={people}
+          authEmail={authUser?.email}
+          onPick={linkMeToPerson}
+          onAddNew={(name) => {
+            const newPerson = { id: uid(), name };
+            setData((d) => ({ ...d, people: [...d.people, newPerson] }));
+            linkMeToPerson(newPerson.id);
+          }}
+          onSkip={() => setWhoAreYouOpen(false)}
         />
       )}
     </div>
@@ -464,7 +605,7 @@ function PropertyView({ property, categories, hasUncategorized, itemCountForCate
 }
 
 /* ---------- Category view: item list ---------- */
-function CategoryView({ property, category, items, personName, onAddItem, onEditItem, onDeleteItem }) {
+function CategoryView({ property, category, items, personName, propertyName, onAddItem, onEditItem, onDeleteItem }) {
   return (
     <div>
       <div style={styles.itemListHeader}>
@@ -472,7 +613,17 @@ function CategoryView({ property, category, items, personName, onAddItem, onEdit
           <h1 style={styles.pageTitle}>{category || "Uncategorized"}</h1>
           <div style={styles.pageSubtitle}>{property.name} · {items.length} item{items.length === 1 ? "" : "s"}</div>
         </div>
-        <button style={styles.primaryBtn} onClick={onAddItem}><Plus size={16} /> Log item</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          {items.length > 0 && (
+            <button
+              style={styles.secondaryBtn}
+              onClick={() => downloadItemsAsCsv(items, propertyName, personName, `${property.name}-${category || "uncategorized"}.csv`)}
+            >
+              <Download size={14} /> Export CSV
+            </button>
+          )}
+          <button style={styles.primaryBtn} onClick={onAddItem}><Plus size={16} /> Log item</button>
+        </div>
       </div>
       {items.length === 0 ? (
         <EmptyState
@@ -518,8 +669,11 @@ function SearchResultsView({ results, propertyName, personName, onEdit, onDelete
 function ItemTag({ item, holderName, locationLabel, onEdit, onDelete }) {
   return (
     <div style={styles.tagCard}>
-      <div style={styles.tagHole} />
-      <div style={styles.tagBody}>
+      {item.photo && (
+        <img src={item.photo} alt={item.name} style={styles.tagPhoto} />
+      )}
+      {!item.photo && <div style={styles.tagHole} />}
+      <div style={item.photo ? { ...styles.tagBody, paddingLeft: 14 } : styles.tagBody}>
         <div style={styles.tagTopRow}>
           <span style={styles.tagName}>{item.name}</span>
           <div style={styles.tagActions}>
@@ -564,21 +718,40 @@ function EmptyState({ icon, title, body, actionLabel, onAction }) {
 }
 
 /* ---------- Item form modal ---------- */
-function ItemFormModal({ item, properties, people, categories, defaultPropertyId, defaultCategory, onClose, onSave }) {
+function ItemFormModal({ item, properties, people, categories, defaultPropertyId, defaultCategory, defaultHolderId, onClose, onSave }) {
   const [name, setName] = useState(item?.name || "");
   const [propertyId, setPropertyId] = useState(item?.propertyId || defaultPropertyId || properties[0]?.id || "");
   const [category, setCategory] = useState(item?.category ?? defaultCategory ?? "");
   const [newCategory, setNewCategory] = useState("");
   const [addingCategory, setAddingCategory] = useState(false);
-  const [holderId, setHolderId] = useState(item?.holderId || "");
+  const [holderId, setHolderId] = useState(item?.holderId ?? defaultHolderId ?? "");
   const [quantity, setQuantity] = useState(item?.quantity ?? 1);
   const [notes, setNotes] = useState(item?.notes || "");
   const [customFields, setCustomFields] = useState(item?.customFields?.length ? item.customFields : [{ key: "", value: "" }]);
+  const [photo, setPhoto] = useState(item?.photo || null);
+  const [photoBusy, setPhotoBusy] = useState(false);
   const [error, setError] = useState("");
+  const fileInputRef = useRef(null);
 
   const updateField = (i, key, value) => setCustomFields((f) => f.map((row, idx) => (idx === i ? { ...row, [key]: value } : row)));
   const addFieldRow = () => setCustomFields((f) => [...f, { key: "", value: "" }]);
   const removeFieldRow = (i) => setCustomFields((f) => f.filter((_, idx) => idx !== i));
+
+  const handlePhotoChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPhotoBusy(true);
+    setError("");
+    try {
+      const dataUrl = await compressImageFile(file);
+      setPhoto(dataUrl);
+    } catch (err) {
+      setError("Couldn't read that photo — try a different file.");
+    } finally {
+      setPhotoBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
 
   const handleSave = () => {
     if (!name.trim()) return setError("Give the item a name.");
@@ -593,6 +766,7 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
       holderId: holderId || null,
       quantity: Math.max(1, Number(quantity) || 1),
       notes: notes.trim(),
+      photo: photo || null,
       customFields: customFields.filter((f) => f.key.trim()),
       dateAdded: item?.dateAdded || new Date().toISOString(),
     });
@@ -603,6 +777,34 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
       <div style={styles.formGrid}>
         <Field label="Item name">
           <input style={styles.input} value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder="e.g. Silver plate" />
+        </Field>
+
+        <Field label="Photo">
+          {photo ? (
+            <div style={styles.photoPreviewWrap}>
+              <img src={photo} alt="Item preview" style={styles.photoPreview} />
+              <button style={styles.secondaryBtn} onClick={() => setPhoto(null)} type="button">
+                <X size={14} /> Remove photo
+              </button>
+            </div>
+          ) : (
+            <button
+              style={styles.secondaryBtn}
+              type="button"
+              disabled={photoBusy}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {photoBusy ? <Loader2 size={14} className="spin" /> : <Camera size={14} />}
+              {photoBusy ? "Processing…" : "Add a photo"}
+            </button>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            onChange={handlePhotoChange}
+            style={{ display: "none" }}
+          />
         </Field>
 
         <Field label="Quantity">
@@ -799,6 +1001,133 @@ function ConfirmModal({ label, type, onCancel, onConfirm }) {
 }
 
 /* ---------- Shared bits ---------- */
+/* ---------- Login ---------- */
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const friendlyError = (code) => {
+    if (code === "auth/invalid-credential" || code === "auth/wrong-password" || code === "auth/user-not-found") {
+      return "That email or password isn't right.";
+    }
+    if (code === "auth/invalid-email") return "That doesn't look like a valid email.";
+    if (code === "auth/too-many-requests") return "Too many attempts — wait a bit and try again.";
+    return "Something went wrong signing in.";
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setBusy(true);
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), password);
+    } catch (err) {
+      setError(friendlyError(err.code));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={styles.loginScreen}>
+      <form style={styles.loginCard} onSubmit={handleSubmit}>
+        <div style={styles.loginMark}>⌂</div>
+        <div style={styles.loginTitle}>The Manifest</div>
+        <div style={styles.loginSubtitle}>Sign in to see the family inventory.</div>
+
+        <label style={styles.fieldWrap}>
+          <span style={styles.fieldLabel}>Email</span>
+          <div style={styles.loginInputWrap}>
+            <Mail size={14} color={MUTED} />
+            <input
+              type="email"
+              autoComplete="username"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              style={styles.loginInput}
+              placeholder="you@example.com"
+            />
+          </div>
+        </label>
+
+        <label style={styles.fieldWrap}>
+          <span style={styles.fieldLabel}>Password</span>
+          <div style={styles.loginInputWrap}>
+            <Lock size={14} color={MUTED} />
+            <input
+              type="password"
+              autoComplete="current-password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              style={styles.loginInput}
+              placeholder="••••••••"
+            />
+          </div>
+        </label>
+
+        {error && <div style={styles.formError}><AlertCircle size={14} /> {error}</div>}
+
+        <button type="submit" style={{ ...styles.primaryBtn, justifyContent: "center" }} disabled={busy}>
+          {busy ? <Loader2 size={15} className="spin" /> : <Check size={15} />} Sign in
+        </button>
+
+        <div style={styles.loginFootnote}>
+          Don't have an account yet? Ask whoever set this up to add you in the
+          Firebase console.
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ---------- Who are you? ---------- */
+function WhoAreYouModal({ people, authEmail, onPick, onAddNew, onSkip }) {
+  const [newName, setNewName] = useState("");
+  const [adding, setAdding] = useState(people.length === 0);
+
+  return (
+    <ModalShell onClose={onSkip} title="Which family member are you?" width={420}>
+      <p style={{ fontSize: 13, color: MUTED, marginTop: -4 }}>
+        Signed in as {authEmail}. Picking your name lets items you add
+        auto-fill you as the holder — you can change this later from People.
+      </p>
+      {!adding ? (
+        <div style={styles.formGrid}>
+          <div style={styles.manageList}>
+            {people.map((p) => (
+              <button key={p.id} style={styles.whoAreYouRow} onClick={() => onPick(p.id)}>
+                <User size={14} /> {p.name}
+              </button>
+            ))}
+          </div>
+          <button style={styles.addFieldBtn} onClick={() => setAdding(true)}>
+            <Plus size={13} /> I'm not on this list
+          </button>
+          <div style={styles.formActions}>
+            <button style={styles.secondaryBtn} onClick={onSkip}>Skip for now</button>
+          </div>
+        </div>
+      ) : (
+        <div style={styles.formGrid}>
+          <Field label="Your name">
+            <input style={styles.input} value={newName} onChange={(e) => setNewName(e.target.value)} autoFocus placeholder="e.g. Jordan" />
+          </Field>
+          <div style={styles.formActions}>
+            {people.length > 0 && <button style={styles.secondaryBtn} onClick={() => setAdding(false)}>Back</button>}
+            <button style={styles.primaryBtn} onClick={() => newName.trim() && onAddNew(newName.trim())}>
+              <Check size={15} /> Save
+            </button>
+          </div>
+        </div>
+      )}
+    </ModalShell>
+  );
+}
+
 function ModalShell({ children, onClose, title, width }) {
   return (
     <div style={styles.modalOverlay} onClick={onClose}>
@@ -825,6 +1154,8 @@ function GlobalStyle() {
       input, select, textarea, button { font-family: ${FONT_BODY}; }
       input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid #A67C3D; outline-offset: 1px; }
       ::placeholder { color: #A8A395; }
+      .spin { animation: spin 1s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
     `}</style>
   );
 }
@@ -852,6 +1183,24 @@ const BORDER = "#D2CDBE";
 const styles = {
   app: { minHeight: "100vh", background: PAPER, color: TEXT, fontFamily: FONT_BODY },
   loadingScreen: { minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: PAPER },
+
+  loginScreen: { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: PAPER, padding: 20 },
+  loginCard: {
+    background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 14, padding: "32px 28px",
+    width: "100%", maxWidth: 360, display: "flex", flexDirection: "column", gap: 14,
+    boxShadow: "0 12px 32px rgba(30,25,15,0.08)",
+  },
+  loginMark: { width: 40, height: 40, borderRadius: 10, background: INK, color: BRASS, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, marginBottom: 2 },
+  loginTitle: { fontFamily: FONT_DISPLAY, fontSize: 21, fontWeight: 600, color: INK },
+  loginSubtitle: { fontSize: 13, color: MUTED, marginTop: -10, marginBottom: 6 },
+  loginInputWrap: { display: "flex", alignItems: "center", gap: 8, border: `1px solid ${BORDER}`, borderRadius: 7, padding: "9px 11px", background: "#fff" },
+  loginInput: { border: "none", outline: "none", fontSize: 13.5, background: "transparent", width: "100%" },
+  loginFootnote: { fontSize: 11.5, color: MUTED, textAlign: "center", lineHeight: 1.5, marginTop: 4 },
+  whoAreYouRow: {
+    display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
+    background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 8, padding: "10px 12px",
+    fontSize: 13.5, color: TEXT, cursor: "pointer",
+  },
 
   header: {
     display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12,
@@ -896,7 +1245,10 @@ const styles = {
   itemListHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 10, marginBottom: 16 },
   cardGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 14 },
 
-  tagCard: { position: "relative", background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 10, boxShadow: "0 1px 2px rgba(30,25,15,0.06)" },
+  tagCard: { position: "relative", background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 10, boxShadow: "0 1px 2px rgba(30,25,15,0.06)", overflow: "hidden" },
+  tagPhoto: { width: "100%", height: 130, objectFit: "cover", display: "block", borderBottom: `1px solid ${BORDER}` },
+  photoPreviewWrap: { display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start" },
+  photoPreview: { width: 140, height: 105, objectFit: "cover", borderRadius: 8, border: `1px solid ${BORDER}` },
   tagHole: { position: "absolute", top: 12, left: 12, width: 10, height: 10, borderRadius: "50%", border: `2px solid ${BRASS}`, background: PAPER },
   tagBody: { padding: "14px 14px 12px 32px" },
   tagTopRow: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 6 },
