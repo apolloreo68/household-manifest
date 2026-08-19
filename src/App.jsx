@@ -2,8 +2,8 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Home, Warehouse, Plus, X, Search, User, Package, Sofa, Palette,
   UtensilsCrossed, Dumbbell, Shirt, BookOpen, Tv, Wrench, Box,
-  Trash2, Edit3, Tag, Loader2, AlertCircle, Check, Camera, Download,
-  LogOut, Mail, Lock, Image, ImageOff, ChevronDown, ChevronRight
+  Trash2, Edit3, Tag, Loader2, AlertCircle, Check, Camera,
+  LogOut, Mail, Lock, Image, ImageOff, ChevronDown, ChevronRight, ChevronLeft
 } from "lucide-react";
 import { db, auth } from "./firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
@@ -56,33 +56,6 @@ function compressImageFile(file, maxWidth = 640, quality = 0.7) {
   });
 }
 
-function csvEscape(value) {
-  const s = String(value ?? "");
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-
-function downloadItemsAsCsv(items, propertyName, personName, filename) {
-  const header = ["Item", "Quantity", "Property", "Category", "In possession of", "Notes"];
-  const rows = items.map((it) => [
-    it.name,
-    it.quantity || 1,
-    propertyName(it.propertyId),
-    it.category || "Uncategorized",
-    personName(it.holderId) || "In storage",
-    it.notes || "",
-  ]);
-  const csv = [header, ...rows].map((row) => row.map(csvEscape).join(",")).join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
-}
-
 function useDebouncedSave(data, ready) {
   useEffect(() => {
     if (!ready) return;
@@ -107,14 +80,40 @@ export default function App() {
 
   const [homeSearch, setHomeSearch] = useState("");
   const [personFilter, setPersonFilter] = useState("");
-  const [homeCategoryFilter, setHomeCategoryFilter] = useState("");
 
   const [propertyModal, setPropertyModal] = useState(null); // { mode:'create'|'edit', property? }
   const [categoryModal, setCategoryModal] = useState(null); // { mode, category? }
   const [peopleModal, setPeopleModal] = useState(false);
   const [itemModal, setItemModal] = useState(null); // { mode, item? }
+  const [itemDetail, setItemDetail] = useState(null); // the item currently shown in the detail popup
   const [confirmDelete, setConfirmDelete] = useState(null); // { type, id, label }
   const [whoAreYouOpen, setWhoAreYouOpen] = useState(false);
+
+  // Wire the phone/browser back button (and gesture) to step back through
+  // the app's own screens instead of exiting straight out of the page.
+  const pushView = (next) => {
+    const state = {
+      view: next.view,
+      selectedPropertyId: next.selectedPropertyId ?? null,
+      selectedCategory: next.selectedCategory ?? null,
+    };
+    window.history.pushState(state, "");
+    setView(state.view);
+    setSelectedPropertyId(state.selectedPropertyId);
+    setSelectedCategory(state.selectedCategory);
+  };
+
+  useEffect(() => {
+    window.history.replaceState({ view: "home", selectedPropertyId: null, selectedCategory: null }, "");
+    const onPopState = (e) => {
+      const s = e.state || { view: "home", selectedPropertyId: null, selectedCategory: null };
+      setView(s.view);
+      setSelectedPropertyId(s.selectedPropertyId);
+      setSelectedCategory(s.selectedCategory);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
@@ -190,11 +189,10 @@ export default function App() {
   }, [items, view, selectedPropertyId, selectedCategory]);
 
   const homeSearchResults = useMemo(() => {
-    if (!homeSearch.trim() && !personFilter && !homeCategoryFilter) return null;
+    if (!homeSearch.trim() && !personFilter) return null;
     const q = homeSearch.trim().toLowerCase();
     return items.filter((it) => {
       if (personFilter && it.holderId !== personFilter) return false;
-      if (homeCategoryFilter && (it.category || "") !== homeCategoryFilter) return false;
       if (q) {
         const hay = [it.name, it.category, it.notes, ...(it.customFields || []).flatMap((f) => [f.key, f.value])]
           .join(" ").toLowerCase();
@@ -202,7 +200,7 @@ export default function App() {
       }
       return true;
     });
-  }, [items, homeSearch, personFilter, homeCategoryFilter]);
+  }, [items, homeSearch, personFilter]);
 
   const personName = (id) => people.find((p) => p.id === id)?.name || null;
   const propertyName = (id) => properties.find((p) => p.id === id)?.name || "Unknown";
@@ -220,7 +218,7 @@ export default function App() {
       properties: d.properties.filter((p) => p.id !== id),
       items: d.items.filter((it) => it.propertyId !== id),
     }));
-    if (selectedPropertyId === id) { setView("home"); setSelectedPropertyId(null); }
+    if (selectedPropertyId === id) pushView({ view: "home" });
   };
 
   const saveCategory = (name, oldName) => {
@@ -242,7 +240,7 @@ export default function App() {
       categories: d.categories.filter((c) => c !== name),
       items: d.items.map((it) => (it.category === name ? { ...it, category: "" } : it)),
     }));
-    if (selectedCategory === name) setView(selectedPropertyId ? "property" : "home");
+    if (selectedCategory === name) pushView(selectedPropertyId ? { view: "property", selectedPropertyId } : { view: "home" });
   };
 
   const savePerson = (name, id) => {
@@ -303,6 +301,15 @@ export default function App() {
 
       <header style={styles.header}>
         <div style={styles.brand}>
+          {view !== "home" && (
+            <button
+              style={styles.backBtn}
+              onClick={() => window.history.back()}
+              title="Back"
+            >
+              <ChevronLeft size={18} />
+            </button>
+          )}
           <div style={styles.brandMark}>⌂</div>
           <div>
             <div style={styles.brandTitle}>MyStuff</div>
@@ -310,8 +317,8 @@ export default function App() {
               <Breadcrumb
                 property={selectedProperty}
                 category={(view === "category" || view === "globalCategory") ? selectedCategory : null}
-                onHome={() => { setView("home"); setSelectedPropertyId(null); }}
-                onProperty={() => setView("property")}
+                onHome={() => pushView({ view: "home" })}
+                onProperty={() => pushView({ view: "property", selectedPropertyId })}
               />
             )}
           </div>
@@ -329,34 +336,19 @@ export default function App() {
             </div>
           )}
           {view === "home" && (
-            <select style={styles.filterSelect} value={personFilter} onChange={(e) => setPersonFilter(e.target.value)}>
-              <option value="">Anyone</option>
-              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          )}
-          {view === "home" && (
-            <select style={styles.filterSelect} value={homeCategoryFilter} onChange={(e) => setHomeCategoryFilter(e.target.value)}>
-              <option value="">All categories</option>
-              {categories.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          )}
-          {view === "home" && items.length > 0 && (
-            <button
-              style={styles.secondaryBtn}
-              onClick={() => downloadItemsAsCsv(
-                homeSearchResults || items,
-                propertyName,
-                personName,
-                "mystuff.csv"
-              )}
-              title="Download the current list as a spreadsheet file"
+            <select
+              style={styles.filterSelect}
+              value={personFilter}
+              onChange={(e) => {
+                if (e.target.value === "__manage__") { setPeopleModal(true); return; }
+                setPersonFilter(e.target.value);
+              }}
             >
-              <Download size={14} /> Export CSV
-            </button>
+              <option value="">People</option>
+              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              <option value="__manage__">Manage people…</option>
+            </select>
           )}
-          <button style={styles.secondaryBtn} onClick={() => setPeopleModal(true)}>
-            <User size={14} /> People
-          </button>
           <button style={styles.secondaryBtn} onClick={() => signOut(auth)} title="Sign out">
             <LogOut size={14} />
           </button>
@@ -379,11 +371,11 @@ export default function App() {
             itemCountForProperty={itemCountForProperty}
             itemCountForCategoryGlobal={itemCountForCategoryGlobal}
             hasGlobalUncategorized={hasGlobalUncategorized}
-            onOpen={(id) => { setSelectedPropertyId(id); setView("property"); }}
+            onOpen={(id) => pushView({ view: "property", selectedPropertyId: id })}
             onEdit={(p) => setPropertyModal({ mode: "edit", property: p })}
             onDelete={(p) => setConfirmDelete({ type: "property", id: p.id, label: p.name })}
             onAdd={() => setPropertyModal({ mode: "create" })}
-            onOpenGlobalCategory={(cat) => { setSelectedCategory(cat); setSelectedPropertyId(null); setView("globalCategory"); }}
+            onOpenGlobalCategory={(cat) => pushView({ view: "globalCategory", selectedCategory: cat })}
           />
         ) : view === "property" ? (
           <PropertyView
@@ -391,7 +383,7 @@ export default function App() {
             categories={categoriesInProperty.list}
             hasUncategorized={categoriesInProperty.hasUncategorized}
             itemCountForCategory={(cat) => itemCountForCategory(selectedPropertyId, cat)}
-            onOpenCategory={(cat) => { setSelectedCategory(cat); setView("category"); }}
+            onOpenCategory={(cat) => pushView({ view: "category", selectedPropertyId, selectedCategory: cat })}
             onEditCategory={(cat) => setCategoryModal({ mode: "edit", category: cat })}
             onDeleteCategory={(cat) => setConfirmDelete({ type: "category", id: cat, label: cat })}
             onAddCategory={() => setCategoryModal({ mode: "create" })}
@@ -404,8 +396,7 @@ export default function App() {
             personName={personName}
             propertyName={propertyName}
             onAddItem={() => setItemModal({ mode: "create" })}
-            onEditItem={(it) => setItemModal({ mode: "edit", item: it })}
-            onDeleteItem={(it) => setConfirmDelete({ type: "item", id: it.id, label: it.name })}
+            onOpenItem={(it) => setItemDetail(it.id)}
           />
         ) : null}
       </main>
@@ -446,6 +437,18 @@ export default function App() {
           defaultCategory={(view === "category" || view === "globalCategory") ? selectedCategory : ""}
           onClose={() => setItemModal(null)}
           onSave={(item) => { upsertItem(item); setItemModal(null); }}
+        />
+      )}
+
+      {itemDetail && (
+        <ItemDetailModal
+          item={items.find((it) => it.id === itemDetail) || null}
+          propertyName={propertyName}
+          personName={personName}
+          showLocation={view === "globalCategory"}
+          onClose={() => setItemDetail(null)}
+          onEdit={(it) => { setItemModal({ mode: "edit", item: it }); setItemDetail(null); }}
+          onDelete={(it) => { setConfirmDelete({ type: "item", id: it.id, label: it.name }); setItemDetail(null); }}
         />
       )}
 
@@ -677,7 +680,7 @@ function PropertyView({ property, categories, hasUncategorized, itemCountForCate
 }
 
 /* ---------- Category view: item list ---------- */
-function CategoryView({ property, category, items, personName, propertyName, onAddItem, onEditItem, onDeleteItem }) {
+function CategoryView({ property, category, items, personName, propertyName, onAddItem, onOpenItem }) {
   const hasPhotos = items.some((it) => it.photo);
   const [showPhotos, setShowPhotos] = useState(true);
 
@@ -697,17 +700,6 @@ function CategoryView({ property, category, items, personName, propertyName, onA
               {showPhotos ? "Hide photos" : "Show photos"}
             </button>
           )}
-          {items.length > 0 && (
-            <button
-              style={styles.secondaryBtn}
-              onClick={() => downloadItemsAsCsv(
-                items, propertyName, personName,
-                property ? `${property.name}-${category || "uncategorized"}.csv` : `${category || "uncategorized"}-all-properties.csv`
-              )}
-            >
-              <Download size={14} /> Export CSV
-            </button>
-          )}
           <button style={styles.primaryBtn} onClick={onAddItem}><Plus size={16} /> Log item</button>
         </div>
       </div>
@@ -720,14 +712,29 @@ function CategoryView({ property, category, items, personName, propertyName, onA
           onAction={onAddItem}
         />
       ) : (
-        <div style={styles.cardGrid}>
+        <div style={styles.itemTileGrid}>
           {items.map((it) => (
-            <ItemTag key={it.id} item={it} holderName={personName(it.holderId)} showPhoto={showPhotos}
-              locationLabel={property ? undefined : propertyName(it.propertyId)}
-              onEdit={() => onEditItem(it)} onDelete={() => onDeleteItem(it)} />
+            <ItemCompactTile
+              key={it.id}
+              item={it}
+              showPhoto={showPhotos}
+              locationLabel={property ? null : propertyName(it.propertyId)}
+              onClick={() => onOpenItem(it)}
+            />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function ItemCompactTile({ item, showPhoto, locationLabel, onClick }) {
+  const displayPhoto = showPhoto && !!item.photo;
+  return (
+    <div style={styles.itemCompactTile} onClick={onClick}>
+      {displayPhoto && <img src={item.photo} alt={item.name} style={styles.itemCompactPhoto} />}
+      <div style={styles.itemCompactName}>{item.name}</div>
+      {locationLabel && <div style={styles.itemCompactLocation}>{locationLabel}</div>}
     </div>
   );
 }
@@ -790,6 +797,63 @@ function ItemTag({ item, holderName, locationLabel, showPhoto = true, onEdit, on
         </div>
       </div>
     </div>
+  );
+}
+
+/* ---------- Item detail popup ---------- */
+function ItemDetailModal({ item, propertyName, personName, showLocation, onClose, onEdit, onDelete }) {
+  if (!item) return null;
+  return (
+    <ModalShell onClose={onClose} title={item.name} width={460}>
+      <div style={styles.formGrid}>
+        {item.photo && <img src={item.photo} alt={item.name} style={styles.detailPhoto} />}
+
+        <div style={styles.detailRow}>
+          <span style={styles.detailLabel}>Quantity</span>
+          <span style={styles.detailValue}>{item.quantity || 1}</span>
+        </div>
+        <div style={styles.detailRow}>
+          <span style={styles.detailLabel}>In the possession of</span>
+          <span style={styles.detailValue}>{personName(item.holderId) || "In storage"}</span>
+        </div>
+        {showLocation && (
+          <div style={styles.detailRow}>
+            <span style={styles.detailLabel}>Property</span>
+            <span style={styles.detailValue}>{propertyName(item.propertyId)}</span>
+          </div>
+        )}
+        <div style={styles.detailRow}>
+          <span style={styles.detailLabel}>Category</span>
+          <span style={styles.detailValue}>{item.category || "Uncategorized"}</span>
+        </div>
+
+        {item.customFields?.length > 0 && (
+          <div>
+            <div style={styles.fieldLabel}>Custom fields</div>
+            <div style={styles.customFieldList}>
+              {item.customFields.map((f, i) => f.key ? (
+                <div key={i} style={styles.customField}>
+                  <span style={styles.customFieldKey}>{f.key}</span>
+                  <span style={styles.customFieldVal}>{f.value}</span>
+                </div>
+              ) : null)}
+            </div>
+          </div>
+        )}
+
+        {item.notes && (
+          <div>
+            <div style={styles.fieldLabel}>Notes</div>
+            <div style={styles.tagNotes}>{item.notes}</div>
+          </div>
+        )}
+
+        <div style={styles.formActions}>
+          <button style={styles.secondaryBtn} onClick={() => onDelete(item)}><Trash2 size={14} /> Delete</button>
+          <button style={styles.primaryBtn} onClick={() => onEdit(item)}><Edit3 size={14} /> Edit</button>
+        </div>
+      </div>
+    </ModalShell>
   );
 }
 
@@ -1295,6 +1359,11 @@ const styles = {
     padding: "18px 28px", borderBottom: `1px solid ${BORDER}`, background: "#F2F0E7", position: "sticky", top: 0, zIndex: 10,
   },
   brand: { display: "flex", alignItems: "center", gap: 12 },
+  backBtn: {
+    display: "flex", alignItems: "center", justifyContent: "center",
+    width: 32, height: 32, background: "#fff", border: `1px solid ${BORDER}`,
+    borderRadius: 4, cursor: "pointer", color: TEXT, flexShrink: 0,
+  },
   brandMark: { width: 34, height: 34, borderRadius: 4, background: INK, color: BRASS, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 },
   brandTitle: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17, color: INK },
   breadcrumb: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 2 },
@@ -1343,6 +1412,20 @@ const styles = {
 
   itemListHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 10, marginBottom: 16 },
   cardGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 14 },
+
+  itemTileGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(108px, 1fr))", gap: 10 },
+  itemCompactTile: {
+    background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 4, padding: "10px 8px",
+    cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: 5,
+  },
+  itemCompactPhoto: { width: "100%", height: 64, objectFit: "cover", borderRadius: 3, marginBottom: 2 },
+  itemCompactName: { fontSize: 12.5, fontWeight: 600, color: TEXT, lineHeight: 1.3, wordBreak: "break-word" },
+  itemCompactLocation: { fontSize: 10, color: MUTED, fontFamily: FONT_MONO },
+
+  detailPhoto: { width: "100%", maxHeight: 220, objectFit: "cover", borderRadius: 4, border: `1px solid ${BORDER}` },
+  detailRow: { display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13.5, padding: "2px 0" },
+  detailLabel: { color: MUTED },
+  detailValue: { color: TEXT, fontWeight: 500 },
 
   tagCard: { position: "relative", background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 4, boxShadow: "0 1px 2px rgba(30,25,15,0.06)", overflow: "hidden" },
   tagPhoto: { width: "100%", height: 130, objectFit: "cover", display: "block", borderBottom: `1px solid ${BORDER}` },
