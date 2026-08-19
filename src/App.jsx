@@ -3,7 +3,7 @@ import {
   Home, Warehouse, Plus, X, Search, User, Package, Sofa, Palette,
   UtensilsCrossed, Dumbbell, Shirt, BookOpen, Tv, Wrench, Box,
   Trash2, Edit3, Tag, Loader2, AlertCircle, Check, Camera, Download,
-  LogOut, Mail, Lock, Image, ImageOff
+  LogOut, Mail, Lock, Image, ImageOff, ChevronDown, ChevronRight
 } from "lucide-react";
 import { db, auth } from "./firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
@@ -168,6 +168,8 @@ export default function App() {
   const itemCountForProperty = (propertyId) => items.filter((it) => it.propertyId === propertyId).length;
   const itemCountForCategory = (propertyId, cat) =>
     items.filter((it) => it.propertyId === propertyId && (it.category || "") === (cat || "")).length;
+  const itemCountForCategoryGlobal = (cat) => items.filter((it) => (it.category || "") === (cat || "")).length;
+  const hasGlobalUncategorized = items.some((it) => !it.category);
 
   const categoriesInProperty = useMemo(() => {
     if (!selectedPropertyId) return { list: [], hasUncategorized: false };
@@ -176,10 +178,15 @@ export default function App() {
   }, [items, categories, selectedPropertyId]);
 
   const currentItems = useMemo(() => {
-    if (view !== "category" || !selectedPropertyId) return [];
-    return items.filter(
-      (it) => it.propertyId === selectedPropertyId && (it.category || "") === (selectedCategory || "")
-    );
+    if (view === "category" && selectedPropertyId) {
+      return items.filter(
+        (it) => it.propertyId === selectedPropertyId && (it.category || "") === (selectedCategory || "")
+      );
+    }
+    if (view === "globalCategory") {
+      return items.filter((it) => (it.category || "") === (selectedCategory || ""));
+    }
+    return [];
   }, [items, view, selectedPropertyId, selectedCategory]);
 
   const homeSearchResults = useMemo(() => {
@@ -235,7 +242,7 @@ export default function App() {
       categories: d.categories.filter((c) => c !== name),
       items: d.items.map((it) => (it.category === name ? { ...it, category: "" } : it)),
     }));
-    if (selectedCategory === name) setView("property");
+    if (selectedCategory === name) setView(selectedPropertyId ? "property" : "home");
   };
 
   const savePerson = (name, id) => {
@@ -302,7 +309,7 @@ export default function App() {
             {view !== "home" && (
               <Breadcrumb
                 property={selectedProperty}
-                category={view === "category" ? selectedCategory : null}
+                category={(view === "category" || view === "globalCategory") ? selectedCategory : null}
                 onHome={() => { setView("home"); setSelectedPropertyId(null); }}
                 onProperty={() => setView("property")}
               />
@@ -368,11 +375,15 @@ export default function App() {
         ) : view === "home" ? (
           <HomeView
             properties={properties}
+            categories={categories}
             itemCountForProperty={itemCountForProperty}
+            itemCountForCategoryGlobal={itemCountForCategoryGlobal}
+            hasGlobalUncategorized={hasGlobalUncategorized}
             onOpen={(id) => { setSelectedPropertyId(id); setView("property"); }}
             onEdit={(p) => setPropertyModal({ mode: "edit", property: p })}
             onDelete={(p) => setConfirmDelete({ type: "property", id: p.id, label: p.name })}
             onAdd={() => setPropertyModal({ mode: "create" })}
+            onOpenGlobalCategory={(cat) => { setSelectedCategory(cat); setSelectedPropertyId(null); setView("globalCategory"); }}
           />
         ) : view === "property" ? (
           <PropertyView
@@ -385,7 +396,7 @@ export default function App() {
             onDeleteCategory={(cat) => setConfirmDelete({ type: "category", id: cat, label: cat })}
             onAddCategory={() => setCategoryModal({ mode: "create" })}
           />
-        ) : (
+        ) : (view === "category" || view === "globalCategory") ? (
           <CategoryView
             property={selectedProperty}
             category={selectedCategory}
@@ -396,7 +407,7 @@ export default function App() {
             onEditItem={(it) => setItemModal({ mode: "edit", item: it })}
             onDeleteItem={(it) => setConfirmDelete({ type: "item", id: it.id, label: it.name })}
           />
-        )}
+        ) : null}
       </main>
 
       {propertyModal && (
@@ -432,7 +443,7 @@ export default function App() {
           people={people}
           categories={categories}
           defaultPropertyId={selectedPropertyId}
-          defaultCategory={view === "category" ? selectedCategory : ""}
+          defaultCategory={(view === "category" || view === "globalCategory") ? selectedCategory : ""}
           onClose={() => setItemModal(null)}
           onSave={(item) => { upsertItem(item); setItemModal(null); }}
         />
@@ -490,10 +501,15 @@ function Breadcrumb({ property, category, onHome, onProperty }) {
   );
 }
 
-/* ---------- Home: property grid ---------- */
-function HomeView({ properties, itemCountForProperty, onOpen, onEdit, onDelete, onAdd }) {
+/* ---------- Home: collapsible sections ---------- */
+function HomeView({
+  properties, categories, itemCountForProperty, itemCountForCategoryGlobal, hasGlobalUncategorized,
+  onOpen, onEdit, onDelete, onAdd, onOpenGlobalCategory,
+}) {
   const houses = properties.filter((p) => p.type === "house");
   const storage = properties.filter((p) => p.type === "storage");
+  const [openSections, setOpenSections] = useState({ houses: false, storage: false, categories: false });
+  const toggle = (key) => setOpenSections((s) => ({ ...s, [key]: !s[key] }));
 
   if (properties.length === 0) {
     return (
@@ -510,8 +526,13 @@ function HomeView({ properties, itemCountForProperty, onOpen, onEdit, onDelete, 
   return (
     <div>
       {houses.length > 0 && (
-        <>
-          <SectionLabel icon={<Home size={13} />} label="Houses" />
+        <CollapsibleSection
+          icon={<Home size={15} />}
+          label="Houses"
+          count={houses.length}
+          open={openSections.houses}
+          onToggle={() => toggle("houses")}
+        >
           <TileGrid>
             {houses.map((p) => (
               <PropertyTile key={p.id} property={p} colorIndex={properties.indexOf(p)}
@@ -519,11 +540,17 @@ function HomeView({ properties, itemCountForProperty, onOpen, onEdit, onDelete, 
                 onEdit={() => onEdit(p)} onDelete={() => onDelete(p)} />
             ))}
           </TileGrid>
-        </>
+        </CollapsibleSection>
       )}
+
       {storage.length > 0 && (
-        <>
-          <SectionLabel icon={<Warehouse size={13} />} label="Storage spots" />
+        <CollapsibleSection
+          icon={<Warehouse size={15} />}
+          label="Storage"
+          count={storage.length}
+          open={openSections.storage}
+          onToggle={() => toggle("storage")}
+        >
           <TileGrid>
             {storage.map((p) => (
               <PropertyTile key={p.id} property={p} colorIndex={properties.indexOf(p)}
@@ -531,8 +558,42 @@ function HomeView({ properties, itemCountForProperty, onOpen, onEdit, onDelete, 
                 onEdit={() => onEdit(p)} onDelete={() => onDelete(p)} />
             ))}
           </TileGrid>
-        </>
+        </CollapsibleSection>
       )}
+
+      {(categories.length > 0 || hasGlobalUncategorized) && (
+        <CollapsibleSection
+          icon={<Tag size={15} />}
+          label="Item categories"
+          count={categories.length + (hasGlobalUncategorized ? 1 : 0)}
+          open={openSections.categories}
+          onToggle={() => toggle("categories")}
+        >
+          <div style={styles.pageSubtitle}>See everything in a category, across every property.</div>
+          <TileGrid>
+            {categories.map((cat, i) => {
+              const Icon = categoryIcon(cat);
+              const color = TILE_COLORS[i % TILE_COLORS.length];
+              const count = itemCountForCategoryGlobal(cat);
+              return (
+                <div key={cat} style={styles.tile} onClick={() => onOpenGlobalCategory(cat)}>
+                  <div style={{ ...styles.tileIconWrap, background: color + "22", color }}><Icon size={26} /></div>
+                  <div style={styles.tileName}>{cat}</div>
+                  <div style={styles.tileMeta}>{count} item{count === 1 ? "" : "s"}</div>
+                </div>
+              );
+            })}
+            {hasGlobalUncategorized && (
+              <div style={styles.tile} onClick={() => onOpenGlobalCategory("")}>
+                <div style={{ ...styles.tileIconWrap, background: "#8A857722", color: "#8A8577" }}><Box size={26} /></div>
+                <div style={styles.tileName}>Uncategorized</div>
+                <div style={styles.tileMeta}>{itemCountForCategoryGlobal("")} item{itemCountForCategoryGlobal("") === 1 ? "" : "s"}</div>
+              </div>
+            )}
+          </TileGrid>
+        </CollapsibleSection>
+      )}
+
       <button style={styles.addTile} onClick={onAdd}>
         <Plus size={16} /> Add a property
       </button>
@@ -540,8 +601,20 @@ function HomeView({ properties, itemCountForProperty, onOpen, onEdit, onDelete, 
   );
 }
 
-function SectionLabel({ icon, label }) {
-  return <div style={styles.sectionLabel}>{icon}<span>{label}</span></div>;
+function CollapsibleSection({ icon, label, count, open, onToggle, children }) {
+  return (
+    <div style={styles.collapsibleSection}>
+      <button style={styles.collapsibleBar} onClick={onToggle}>
+        <span style={styles.collapsibleBarLeft}>
+          {icon}
+          <span style={styles.collapsibleBarLabel}>{label}</span>
+          <span style={styles.collapsibleBarCount}>{count}</span>
+        </span>
+        {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+      </button>
+      {open && <div style={styles.collapsibleContent}>{children}</div>}
+    </div>
+  );
 }
 
 function TileGrid({ children }) {
@@ -613,7 +686,9 @@ function CategoryView({ property, category, items, personName, propertyName, onA
       <div style={styles.itemListHeader}>
         <div>
           <h1 style={styles.pageTitle}>{category || "Uncategorized"}</h1>
-          <div style={styles.pageSubtitle}>{property.name} · {items.length} item{items.length === 1 ? "" : "s"}</div>
+          <div style={styles.pageSubtitle}>
+            {property ? property.name : "All properties"} · {items.length} item{items.length === 1 ? "" : "s"}
+          </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {hasPhotos && (
@@ -625,7 +700,10 @@ function CategoryView({ property, category, items, personName, propertyName, onA
           {items.length > 0 && (
             <button
               style={styles.secondaryBtn}
-              onClick={() => downloadItemsAsCsv(items, propertyName, personName, `${property.name}-${category || "uncategorized"}.csv`)}
+              onClick={() => downloadItemsAsCsv(
+                items, propertyName, personName,
+                property ? `${property.name}-${category || "uncategorized"}.csv` : `${category || "uncategorized"}-all-properties.csv`
+              )}
             >
               <Download size={14} /> Export CSV
             </button>
@@ -645,6 +723,7 @@ function CategoryView({ property, category, items, personName, propertyName, onA
         <div style={styles.cardGrid}>
           {items.map((it) => (
             <ItemTag key={it.id} item={it} holderName={personName(it.holderId)} showPhoto={showPhotos}
+              locationLabel={property ? undefined : propertyName(it.propertyId)}
               onEdit={() => onEditItem(it)} onDelete={() => onDeleteItem(it)} />
           ))}
         </div>
@@ -1236,6 +1315,17 @@ const styles = {
   pageSubtitle: { fontSize: 12.5, color: MUTED, marginTop: 4, fontFamily: FONT_MONO },
 
   sectionLabel: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: MUTED, margin: "18px 2px 10px" },
+
+  collapsibleSection: { marginBottom: 12 },
+  collapsibleBar: {
+    display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
+    background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 4, padding: "14px 16px",
+    cursor: "pointer", color: TEXT,
+  },
+  collapsibleBarLeft: { display: "flex", alignItems: "center", gap: 10 },
+  collapsibleBarLabel: { fontFamily: FONT_DISPLAY, fontSize: 15.5, fontWeight: 600 },
+  collapsibleBarCount: { fontFamily: FONT_MONO, fontSize: 11.5, color: MUTED, background: PAPER_DARK, padding: "2px 8px", borderRadius: 20 },
+  collapsibleContent: { padding: "14px 2px 4px" },
   tileGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 },
   tile: {
     position: "relative", background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 3,
