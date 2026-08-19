@@ -3,7 +3,7 @@ import {
   Home, Warehouse, Plus, X, Search, User, Package, Sofa, Palette,
   UtensilsCrossed, Dumbbell, Shirt, BookOpen, Tv, Wrench, Box,
   Trash2, Edit3, Tag, Loader2, AlertCircle, Check, Camera, Download,
-  LogOut, Mail, Lock
+  LogOut, Mail, Lock, Image, ImageOff
 } from "lucide-react";
 import { db, auth } from "./firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
@@ -13,7 +13,7 @@ import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebas
 // has this app open gets pushed live updates via onSnapshot.
 const MANIFEST_DOC = doc(db, "manifest", "household");
 
-const TILE_COLORS = ["#3F6357", "#40587A", "#A67C3D", "#7A4F5A", "#5B6B3F", "#3F5A63", "#6B4F7A", "#7A5B3F"];
+const TILE_COLORS = ["#2E7A83", "#0F3B4D", "#E8A33D", "#6E9B8C", "#3F5F73", "#4C93A0", "#C98A2E", "#557A85"];
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 const emptyData = () => ({ properties: [], people: [], categories: [], items: [] });
@@ -285,7 +285,7 @@ export default function App() {
       <div style={styles.loadingScreen}>
         <GlobalStyle />
         <Loader2 className="spin" size={28} color="#A67C3D" />
-        <div style={{ marginTop: 12, fontFamily: FONT_BODY, color: "#8A8577" }}>Opening the manifest…</div>
+        <div style={{ marginTop: 12, fontFamily: FONT_BODY, color: "#8A8577" }}>Opening MyStuff…</div>
       </div>
     );
   }
@@ -298,7 +298,7 @@ export default function App() {
         <div style={styles.brand}>
           <div style={styles.brandMark}>⌂</div>
           <div>
-            <div style={styles.brandTitle}>The Manifest</div>
+            <div style={styles.brandTitle}>MyStuff</div>
             {view !== "home" && (
               <Breadcrumb
                 property={selectedProperty}
@@ -340,7 +340,7 @@ export default function App() {
                 homeSearchResults || items,
                 propertyName,
                 personName,
-                "household-manifest.csv"
+                "mystuff.csv"
               )}
               title="Download the current list as a spreadsheet file"
             >
@@ -500,7 +500,7 @@ function HomeView({ properties, itemCountForProperty, onOpen, onEdit, onDelete, 
       <EmptyState
         icon={<Home size={30} color="#A67C3D" />}
         title="No properties yet"
-        body="Add your first house or storage spot to start the manifest."
+        body="Add your first house or storage spot to get started."
         actionLabel="Add a property"
         onAction={onAdd}
       />
@@ -605,6 +605,9 @@ function PropertyView({ property, categories, hasUncategorized, itemCountForCate
 
 /* ---------- Category view: item list ---------- */
 function CategoryView({ property, category, items, personName, propertyName, onAddItem, onEditItem, onDeleteItem }) {
+  const hasPhotos = items.some((it) => it.photo);
+  const [showPhotos, setShowPhotos] = useState(true);
+
   return (
     <div>
       <div style={styles.itemListHeader}>
@@ -613,6 +616,12 @@ function CategoryView({ property, category, items, personName, propertyName, onA
           <div style={styles.pageSubtitle}>{property.name} · {items.length} item{items.length === 1 ? "" : "s"}</div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
+          {hasPhotos && (
+            <button style={styles.secondaryBtn} onClick={() => setShowPhotos((s) => !s)}>
+              {showPhotos ? <ImageOff size={14} /> : <Image size={14} />}
+              {showPhotos ? "Hide photos" : "Show photos"}
+            </button>
+          )}
           {items.length > 0 && (
             <button
               style={styles.secondaryBtn}
@@ -635,7 +644,7 @@ function CategoryView({ property, category, items, personName, propertyName, onA
       ) : (
         <div style={styles.cardGrid}>
           {items.map((it) => (
-            <ItemTag key={it.id} item={it} holderName={personName(it.holderId)}
+            <ItemTag key={it.id} item={it} holderName={personName(it.holderId)} showPhoto={showPhotos}
               onEdit={() => onEditItem(it)} onDelete={() => onDeleteItem(it)} />
           ))}
         </div>
@@ -665,14 +674,15 @@ function SearchResultsView({ results, propertyName, personName, onEdit, onDelete
 }
 
 /* ---------- Item tag card ---------- */
-function ItemTag({ item, holderName, locationLabel, onEdit, onDelete }) {
+function ItemTag({ item, holderName, locationLabel, showPhoto = true, onEdit, onDelete }) {
+  const displayPhoto = showPhoto && !!item.photo;
   return (
     <div style={styles.tagCard}>
-      {item.photo && (
+      {displayPhoto && (
         <img src={item.photo} alt={item.name} style={styles.tagPhoto} />
       )}
-      {!item.photo && <div style={styles.tagHole} />}
-      <div style={item.photo ? { ...styles.tagBody, paddingLeft: 14 } : styles.tagBody}>
+      {!displayPhoto && <div style={styles.tagHole} />}
+      <div style={displayPhoto ? { ...styles.tagBody, paddingLeft: 14 } : styles.tagBody}>
         <div style={styles.tagTopRow}>
           <span style={styles.tagName}>{item.name}</span>
           <div style={styles.tagActions}>
@@ -867,7 +877,7 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
 
         <div style={styles.formActions}>
           <button style={styles.secondaryBtn} onClick={onClose}>Cancel</button>
-          <button style={styles.primaryBtn} onClick={handleSave}><Check size={15} /> {item ? "Save changes" : "Add to manifest"}</button>
+          <button style={styles.primaryBtn} onClick={handleSave}><Check size={15} /> {item ? "Save changes" : "Add item"}</button>
         </div>
       </div>
     </ModalShell>
@@ -1033,7 +1043,7 @@ function LoginScreen() {
     <div style={styles.loginScreen}>
       <form style={styles.loginCard} onSubmit={handleSubmit}>
         <div style={styles.loginMark}>⌂</div>
-        <div style={styles.loginTitle}>The Manifest</div>
+        <div style={styles.loginTitle}>MyStuff</div>
         <div style={styles.loginSubtitle}>Sign in to see the family inventory.</div>
 
         <label style={styles.fieldWrap}>
@@ -1171,13 +1181,13 @@ if (typeof document !== "undefined" && !document.getElementById("manifest-fonts"
   document.head.appendChild(style);
 }
 
-const INK = "#22252A";
-const PAPER = "#EAE7DD";
-const PAPER_DARK = "#DFDBCE";
-const BRASS = "#A67C3D";
-const TEXT = "#26241E";
-const MUTED = "#8A8577";
-const BORDER = "#D2CDBE";
+const INK = "#0F3B4D";
+const PAPER = "#F3F6F5";
+const PAPER_DARK = "#E4EAE9";
+const BRASS = "#E8A33D";
+const TEXT = "#16303B";
+const MUTED = "#6E828A";
+const BORDER = "#DCE3E2";
 
 const styles = {
   app: { minHeight: "100vh", background: PAPER, color: TEXT, fontFamily: FONT_BODY },
@@ -1185,19 +1195,19 @@ const styles = {
 
   loginScreen: { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: PAPER, padding: 20 },
   loginCard: {
-    background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 14, padding: "32px 28px",
+    background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 4, padding: "32px 28px",
     width: "100%", maxWidth: 360, display: "flex", flexDirection: "column", gap: 14,
     boxShadow: "0 12px 32px rgba(30,25,15,0.08)",
   },
-  loginMark: { width: 40, height: 40, borderRadius: 10, background: INK, color: BRASS, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, marginBottom: 2 },
+  loginMark: { width: 40, height: 40, borderRadius: 4, background: INK, color: BRASS, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, marginBottom: 2 },
   loginTitle: { fontFamily: FONT_DISPLAY, fontSize: 21, fontWeight: 600, color: INK },
   loginSubtitle: { fontSize: 13, color: MUTED, marginTop: -10, marginBottom: 6 },
-  loginInputWrap: { display: "flex", alignItems: "center", gap: 8, border: `1px solid ${BORDER}`, borderRadius: 7, padding: "9px 11px", background: "#fff" },
+  loginInputWrap: { display: "flex", alignItems: "center", gap: 8, border: `1px solid ${BORDER}`, borderRadius: 4, padding: "9px 11px", background: "#fff" },
   loginInput: { border: "none", outline: "none", fontSize: 13.5, background: "transparent", width: "100%" },
   loginFootnote: { fontSize: 11.5, color: MUTED, textAlign: "center", lineHeight: 1.5, marginTop: 4 },
   whoAreYouRow: {
     display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
-    background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 8, padding: "10px 12px",
+    background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 4, padding: "10px 12px",
     fontSize: 13.5, color: TEXT, cursor: "pointer",
   },
 
@@ -1206,7 +1216,7 @@ const styles = {
     padding: "18px 28px", borderBottom: `1px solid ${BORDER}`, background: "#F2F0E7", position: "sticky", top: 0, zIndex: 10,
   },
   brand: { display: "flex", alignItems: "center", gap: 12 },
-  brandMark: { width: 34, height: 34, borderRadius: 8, background: INK, color: BRASS, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 },
+  brandMark: { width: 34, height: 34, borderRadius: 4, background: INK, color: BRASS, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 },
   brandTitle: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17, color: INK },
   breadcrumb: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 2 },
   crumbBtn: { background: "transparent", border: "none", padding: 0, color: MUTED, cursor: "pointer", fontSize: 12, textDecoration: "underline" },
@@ -1214,12 +1224,12 @@ const styles = {
   crumbCurrent: { color: TEXT, fontWeight: 600 },
   headerActions: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" },
 
-  searchBox: { display: "flex", alignItems: "center", gap: 6, background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 7, padding: "7px 10px", minWidth: 190 },
+  searchBox: { display: "flex", alignItems: "center", gap: 6, background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 4, padding: "7px 10px", minWidth: 190 },
   searchInput: { border: "none", outline: "none", fontSize: 13, background: "transparent", width: "100%" },
-  filterSelect: { border: `1px solid ${BORDER}`, borderRadius: 7, padding: "7px 8px", fontSize: 12.5, background: "#fff", color: TEXT },
+  filterSelect: { border: `1px solid ${BORDER}`, borderRadius: 4, padding: "7px 8px", fontSize: 12.5, background: "#fff", color: TEXT },
 
-  primaryBtn: { display: "flex", alignItems: "center", gap: 6, background: INK, color: "#F2EFE6", border: "none", borderRadius: 7, padding: "9px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
-  secondaryBtn: { display: "flex", alignItems: "center", gap: 6, background: "#fff", color: TEXT, border: `1px solid ${BORDER}`, borderRadius: 7, padding: "9px 13px", fontSize: 13, cursor: "pointer" },
+  primaryBtn: { display: "flex", alignItems: "center", gap: 6, background: INK, color: "#F2EFE6", border: "none", borderRadius: 4, padding: "9px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  secondaryBtn: { display: "flex", alignItems: "center", gap: 6, background: "#fff", color: TEXT, border: `1px solid ${BORDER}`, borderRadius: 4, padding: "9px 13px", fontSize: 13, cursor: "pointer" },
 
   main: { padding: "24px 28px 56px", maxWidth: 1100, margin: "0 auto" },
   pageTitle: { fontFamily: FONT_DISPLAY, fontSize: 25, margin: 0, fontWeight: 600, color: INK },
@@ -1228,32 +1238,32 @@ const styles = {
   sectionLabel: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: MUTED, margin: "18px 2px 10px" },
   tileGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14 },
   tile: {
-    position: "relative", background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 12,
+    position: "relative", background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 3,
     padding: "20px 14px 14px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: 4,
   },
-  tileIconWrap: { width: 52, height: 52, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 6 },
+  tileIconWrap: { width: 52, height: 52, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 6 },
   tileName: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 14.5, color: INK },
   tileMeta: { fontSize: 11, color: MUTED, fontFamily: FONT_MONO },
   tileActions: { position: "absolute", top: 8, right: 8, display: "flex", gap: 2 },
-  tileIconBtn: { background: "#F2F0E7", border: `1px solid ${BORDER}`, borderRadius: 5, padding: 4, cursor: "pointer", color: MUTED, display: "flex" },
+  tileIconBtn: { background: "#F2F0E7", border: `1px solid ${BORDER}`, borderRadius: 3, padding: 4, cursor: "pointer", color: MUTED, display: "flex" },
   addTile: {
     display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px dashed ${BORDER}`,
-    borderRadius: 10, padding: "10px 16px", fontSize: 13, color: MUTED, cursor: "pointer", marginTop: 16,
+    borderRadius: 4, padding: "10px 16px", fontSize: 13, color: MUTED, cursor: "pointer", marginTop: 16,
   },
 
   itemListHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 10, marginBottom: 16 },
   cardGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 14 },
 
-  tagCard: { position: "relative", background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 10, boxShadow: "0 1px 2px rgba(30,25,15,0.06)", overflow: "hidden" },
+  tagCard: { position: "relative", background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 4, boxShadow: "0 1px 2px rgba(30,25,15,0.06)", overflow: "hidden" },
   tagPhoto: { width: "100%", height: 130, objectFit: "cover", display: "block", borderBottom: `1px solid ${BORDER}` },
   photoPreviewWrap: { display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start" },
-  photoPreview: { width: 140, height: 105, objectFit: "cover", borderRadius: 8, border: `1px solid ${BORDER}` },
+  photoPreview: { width: 140, height: 105, objectFit: "cover", borderRadius: 4, border: `1px solid ${BORDER}` },
   tagHole: { position: "absolute", top: 12, left: 12, width: 10, height: 10, borderRadius: "50%", border: `2px solid ${BRASS}`, background: PAPER },
   tagBody: { padding: "14px 14px 12px 32px" },
   tagTopRow: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 6 },
   tagName: { fontFamily: FONT_DISPLAY, fontSize: 15.5, fontWeight: 600, color: INK, lineHeight: 1.25 },
   tagActions: { display: "flex", gap: 2 },
-  iconBtn: { background: "transparent", border: "none", color: MUTED, cursor: "pointer", padding: 4, borderRadius: 5, display: "flex" },
+  iconBtn: { background: "transparent", border: "none", color: MUTED, cursor: "pointer", padding: 4, borderRadius: 3, display: "flex" },
   tagCategory: { display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, marginTop: 5, fontWeight: 500, color: BRASS },
   customFieldList: { marginTop: 8, display: "flex", flexDirection: "column", gap: 3 },
   customField: { display: "flex", justifyContent: "space-between", fontSize: 11.5, fontFamily: FONT_MONO, color: "#5A5648" },
@@ -1271,7 +1281,7 @@ const styles = {
   emptyBody: { fontSize: 13, color: MUTED, lineHeight: 1.5, marginBottom: 8 },
 
   modalOverlay: { position: "fixed", inset: 0, background: "rgba(20,18,12,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 },
-  modal: { background: PAPER, borderRadius: 12, width: "100%", maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" },
+  modal: { background: PAPER, borderRadius: 4, width: "100%", maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" },
   modalHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 20px", borderBottom: `1px solid ${BORDER}` },
   modalTitle: { fontFamily: FONT_DISPLAY, fontSize: 17, fontWeight: 600 },
   modalBody: { padding: 20, overflowY: "auto" },
@@ -1280,13 +1290,13 @@ const styles = {
   formRow2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
   fieldWrap: { display: "flex", flexDirection: "column", gap: 5 },
   fieldLabel: { fontSize: 11.5, letterSpacing: 0.3, color: MUTED, textTransform: "uppercase", fontWeight: 600 },
-  input: { border: `1px solid ${BORDER}`, borderRadius: 7, padding: "9px 11px", fontSize: 13.5, background: "#fff", color: TEXT, width: "100%" },
+  input: { border: `1px solid ${BORDER}`, borderRadius: 4, padding: "9px 11px", fontSize: 13.5, background: "#fff", color: TEXT, width: "100%" },
   customFieldRow: { display: "flex", gap: 6, marginBottom: 6, alignItems: "center" },
-  addFieldBtn: { display: "flex", alignItems: "center", gap: 5, background: "transparent", border: `1px dashed ${BORDER}`, borderRadius: 6, padding: "6px 10px", fontSize: 12, color: MUTED, cursor: "pointer", marginTop: 2 },
+  addFieldBtn: { display: "flex", alignItems: "center", gap: 5, background: "transparent", border: `1px dashed ${BORDER}`, borderRadius: 3, padding: "6px 10px", fontSize: 12, color: MUTED, cursor: "pointer", marginTop: 2 },
   formError: { display: "flex", alignItems: "center", gap: 6, color: "#A64D3D", fontSize: 12.5 },
   formActions: { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 },
 
-  typeToggle: { display: "flex", alignItems: "center", gap: 6, border: `1px solid ${BORDER}`, borderRadius: 7, padding: "8px 12px", background: "#fff", color: TEXT, cursor: "pointer", fontSize: 13 },
+  typeToggle: { display: "flex", alignItems: "center", gap: 6, border: `1px solid ${BORDER}`, borderRadius: 4, padding: "8px 12px", background: "#fff", color: TEXT, cursor: "pointer", fontSize: 13 },
   typeToggleActive: { background: INK, color: "#F2EFE6", borderColor: INK },
 
   addRow: { display: "flex", gap: 8, marginBottom: 12 },
