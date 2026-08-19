@@ -3,7 +3,7 @@ import {
   Home, Warehouse, Plus, X, Search, User, Package, Sofa, Palette,
   UtensilsCrossed, Dumbbell, Shirt, BookOpen, Tv, Wrench, Box,
   Trash2, Edit3, Tag, Loader2, AlertCircle, Check, Camera,
-  LogOut, Mail, Lock, Image, ImageOff, ChevronDown, ChevronRight, ChevronLeft
+  LogOut, Mail, Lock, Image as ImageIcon, ImageOff, ChevronDown, ChevronRight, ChevronLeft
 } from "lucide-react";
 import { db, auth } from "./firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
@@ -34,32 +34,51 @@ function categoryIcon(name = "") {
 // Shrinks a photo down before it's stored, since Firestore documents have a
 // size limit and we're keeping everything in one document. Resizes to a max
 // width and re-encodes as a compressed JPEG.
-function compressImageFile(file, maxWidth = 640, quality = 0.7) {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Timed out processing photo")), 15000);
-    const settle = (fn) => (arg) => { clearTimeout(timeout); fn(arg); };
-    const doResolve = settle(resolve);
-    const doReject = settle(reject);
+// Shrinks a photo down before it's stored, since Firestore documents have a
+// size limit and we're keeping everything in one document. Resizes to a max
+// width and re-encodes as a compressed JPEG. Tries the modern, fast
+// createImageBitmap path first (works straight off the File, no giant base64
+// string in the middle) and falls back to the older Image-element approach
+// for any browser/file that path can't handle.
+async function compressImageFile(file, maxWidth = 640, quality = 0.7) {
+  if (!file.type || !file.type.startsWith("image/")) {
+    throw new Error("That doesn't look like an image file.");
+  }
+  if (file.size > 25 * 1024 * 1024) {
+    throw new Error("That photo is too large (over 25MB).");
+  }
 
+  let source;
+  let width, height;
+  try {
+    source = await createImageBitmap(file);
+    width = source.width;
+    height = source.height;
+  } catch (err) {
+    source = await loadImageElement(file);
+    width = source.naturalWidth || source.width;
+    height = source.naturalHeight || source.height;
+  }
+
+  const scale = Math.min(1, maxWidth / width);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas not available in this browser.");
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  if (source.close) source.close();
+  return canvas.toDataURL("image/jpeg", quality);
+}
+
+function loadImageElement(file) {
+  return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => doReject(new Error("Could not read file"));
+    reader.onerror = () => reject(new Error("Could not read file"));
     reader.onload = () => {
       const img = new Image();
-      img.onerror = () => doReject(new Error("Could not read image"));
-      img.onload = () => {
-        try {
-          const scale = Math.min(1, maxWidth / img.width);
-          const canvas = document.createElement("canvas");
-          canvas.width = Math.round(img.width * scale) || 1;
-          canvas.height = Math.round(img.height * scale) || 1;
-          const ctx = canvas.getContext("2d");
-          if (!ctx) throw new Error("Canvas not available");
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          doResolve(canvas.toDataURL("image/jpeg", quality));
-        } catch (err) {
-          doReject(err);
-        }
-      };
+      img.onerror = () => reject(new Error("Could not read image"));
+      img.onload = () => resolve(img);
       img.src = reader.result;
     };
     reader.readAsDataURL(file);
@@ -706,7 +725,7 @@ function CategoryView({ property, category, items, personName, propertyName, onA
         <div style={{ display: "flex", gap: 8 }}>
           {hasPhotos && (
             <button style={styles.secondaryBtn} onClick={() => setShowPhotos((s) => !s)}>
-              {showPhotos ? <ImageOff size={14} /> : <Image size={14} />}
+              {showPhotos ? <ImageOff size={14} /> : <ImageIcon size={14} />}
               {showPhotos ? "Hide photos" : "Show photos"}
             </button>
           )}
@@ -905,10 +924,14 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
     setPhotoBusy(true);
     setError("");
     try {
-      const dataUrl = await compressImageFile(file);
+      const dataUrl = await Promise.race([
+        compressImageFile(file),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out")), 15000)),
+      ]);
       setPhoto(dataUrl);
     } catch (err) {
-      setError("Couldn't read that photo — try a different file.");
+      console.error("photo processing failed:", err);
+      setError(err?.message && err.message !== "Timed out" ? err.message : "Couldn't process that photo — try a different one.");
     } finally {
       setPhotoBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
