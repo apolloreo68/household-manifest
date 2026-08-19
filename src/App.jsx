@@ -36,19 +36,29 @@ function categoryIcon(name = "") {
 // width and re-encodes as a compressed JPEG.
 function compressImageFile(file, maxWidth = 640, quality = 0.7) {
   return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Timed out processing photo")), 15000);
+    const settle = (fn) => (arg) => { clearTimeout(timeout); fn(arg); };
+    const doResolve = settle(resolve);
+    const doReject = settle(reject);
+
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Could not read file"));
+    reader.onerror = () => doReject(new Error("Could not read file"));
     reader.onload = () => {
       const img = new Image();
-      img.onerror = () => reject(new Error("Could not read image"));
+      img.onerror = () => doReject(new Error("Could not read image"));
       img.onload = () => {
-        const scale = Math.min(1, maxWidth / img.width);
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.round(img.width * scale);
-        canvas.height = Math.round(img.height * scale);
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL("image/jpeg", quality));
+        try {
+          const scale = Math.min(1, maxWidth / img.width);
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.round(img.width * scale) || 1;
+          canvas.height = Math.round(img.height * scale) || 1;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) throw new Error("Canvas not available");
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          doResolve(canvas.toDataURL("image/jpeg", quality));
+        } catch (err) {
+          doReject(err);
+        }
       };
       img.src = reader.result;
     };
