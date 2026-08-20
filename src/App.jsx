@@ -4,7 +4,7 @@ import {
   UtensilsCrossed, Dumbbell, Shirt, BookOpen, Tv, Wrench, Box,
   Trash2, Edit3, Tag, Loader2, AlertCircle, Check, Camera,
   LogOut, Mail, Lock, Image as ImageIcon, ImageOff, ChevronDown, ChevronRight, ChevronLeft,
-  ClipboardList, ArrowRight, CheckCircle2, MapPin
+  ClipboardList, ArrowRight, CheckCircle2, MapPin, ClipboardCheck
 } from "lucide-react";
 import { db, auth } from "./firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
@@ -20,7 +20,7 @@ const MANIFEST_DOC = doc(db, "manifest", "household");
 const TILE_COLORS = ["#E8834A", "#8B5FA3", "#C1583F", "#7C8B6F", "#B8763F", "#6E7CA8", "#A85B7C", "#5F9E82"];
 
 const uid = () => Math.random().toString(36).slice(2, 10);
-const emptyData = () => ({ properties: [], people: [], categories: [], items: [], tasks: [] });
+const emptyData = () => ({ properties: [], people: [], categories: [], items: [], tasks: [], reviewLists: [] });
 
 function categoryIcon(name = "") {
   const n = name.toLowerCase();
@@ -122,6 +122,8 @@ export default function App() {
   const [itemDetail, setItemDetail] = useState(null); // the item currently shown in the detail popup
   const [taskModal, setTaskModal] = useState(null); // { mode, task? }
   const [taskDetail, setTaskDetail] = useState(null); // id of the task currently shown in the detail popup
+  const [reviewListModal, setReviewListModal] = useState(false);
+  const [reviewListDetail, setReviewListDetail] = useState(null); // id of the review list currently shown
   const [confirmDelete, setConfirmDelete] = useState(null); // { type, id, label }
   const [whoAreYouOpen, setWhoAreYouOpen] = useState(false);
 
@@ -150,13 +152,15 @@ export default function App() {
     setItemDetail(null);
     setTaskModal(null);
     setTaskDetail(null);
+    setReviewListModal(false);
+    setReviewListDetail(null);
     setConfirmDelete(null);
     setWhoAreYouOpen(false);
   };
 
   const anyModalOpen = !!(
     propertyModal || categoryModal || roomModal || peopleModal || itemModal || itemDetail ||
-    taskModal || taskDetail || confirmDelete || whoAreYouOpen
+    taskModal || taskDetail || reviewListModal || reviewListDetail || confirmDelete || whoAreYouOpen
   );
   const modalHistoryRef = useRef(false);
 
@@ -473,6 +477,50 @@ export default function App() {
     setTaskDetail(null);
   };
 
+  const upsertReviewList = (list) => {
+    setData((d) => ({
+      ...d,
+      reviewLists: (d.reviewLists || []).some((l) => l.id === list.id)
+        ? d.reviewLists.map((l) => (l.id === list.id ? list : l))
+        : [...(d.reviewLists || []), list],
+    }));
+  };
+  const deleteReviewList = (id) => setData((d) => ({ ...d, reviewLists: (d.reviewLists || []).filter((l) => l.id !== id) }));
+
+  // The approver's call on one item in a review list. "Leave as is" and
+  // "discard/sell" just record the decision; "move" also spins up a real
+  // move task (assigned to the approver, same as any other task) so the
+  // actual relocation happens through the same flow as everywhere else.
+  const decideReviewItem = (listId, itemId, action, destinationPropertyId) => {
+    setData((d) => {
+      const list = (d.reviewLists || []).find((l) => l.id === listId);
+      if (!list) return d;
+      const newTasks = [...d.tasks];
+      if (action === "move" && destinationPropertyId) {
+        newTasks.push({
+          id: uid(),
+          personId: list.approverId,
+          destinationPropertyId,
+          itemIds: [itemId],
+          notes: `From review list: ${list.name}`,
+          dateCreated: new Date().toISOString(),
+        });
+      }
+      return {
+        ...d,
+        reviewLists: d.reviewLists.map((l) => (
+          l.id === listId
+            ? { ...l, decisions: { ...l.decisions, [itemId]: { action, destinationPropertyId: destinationPropertyId || null } } }
+            : l
+        )),
+        items: d.items.map((it) => (
+          it.id === itemId ? { ...it, discardStatus: action === "discard" ? "discard" : null } : it
+        )),
+        tasks: newTasks,
+      };
+    });
+  };
+
   if (!authChecked) {
     return (
       <div style={styles.loadingScreen}>
@@ -576,6 +624,10 @@ export default function App() {
             onAddCategory={() => setCategoryModal({ mode: "create" })}
             onReorderProperties={reorderProperties}
             onReorderCategories={reorderCategories}
+            reviewLists={data.reviewLists || []}
+            personName={personName}
+            onOpenReviewList={(id) => setReviewListDetail(id)}
+            onAddReviewList={() => setReviewListModal(true)}
           />
         ) : view === "property" ? (
           <PropertyView
@@ -712,6 +764,30 @@ export default function App() {
         />
       )}
 
+      {reviewListModal && (
+        <ReviewListModal
+          people={people}
+          properties={properties}
+          items={items}
+          propertyName={propertyName}
+          onClose={() => setReviewListModal(false)}
+          onSave={(list) => { upsertReviewList(list); setReviewListModal(false); }}
+        />
+      )}
+
+      {reviewListDetail && (
+        <ReviewListDetailModal
+          list={(data.reviewLists || []).find((l) => l.id === reviewListDetail) || null}
+          items={items}
+          properties={properties}
+          personName={personName}
+          propertyName={propertyName}
+          onClose={() => setReviewListDetail(null)}
+          onDelete={(list) => { setConfirmDelete({ type: "reviewList", id: list.id, label: list.name }); setReviewListDetail(null); }}
+          onDecide={(itemId, action, destinationPropertyId) => decideReviewItem(reviewListDetail, itemId, action, destinationPropertyId)}
+        />
+      )}
+
       {confirmDelete && (
         <ConfirmModal
           label={confirmDelete.label}
@@ -723,6 +799,7 @@ export default function App() {
             if (confirmDelete.type === "room") deleteRoom(selectedPropertyId, confirmDelete.id);
             if (confirmDelete.type === "item") deleteItem(confirmDelete.id);
             if (confirmDelete.type === "task") deleteTask(confirmDelete.id);
+            if (confirmDelete.type === "reviewList") deleteReviewList(confirmDelete.id);
             setConfirmDelete(null);
           }}
         />
@@ -802,10 +879,11 @@ function HomeView({
   itemCountForProperty, itemCountForCategoryGlobal, hasGlobalUncategorized,
   onOpen, onEdit, onDelete, onAdd, onOpenGlobalCategory, onAddCategory,
   onReorderProperties, onReorderCategories,
+  reviewLists, personName, onOpenReviewList, onAddReviewList,
 }) {
   const houses = properties.filter((p) => p.type === "house");
   const storage = properties.filter((p) => p.type === "storage");
-  const [openSections, setOpenSections] = useState({ houses: false, storage: false, categories: false });
+  const [openSections, setOpenSections] = useState({ houses: false, storage: false, categories: false, review: false });
   const toggle = (key) => setOpenSections((s) => ({ ...s, [key]: !s[key] }));
 
   // Only one section can be "unlocked" for rearranging at a time — hold a
@@ -951,6 +1029,42 @@ function HomeView({
       {categories.length === 0 && !hasGlobalUncategorized && (
         <button style={styles.addTile} onClick={onAddCategory}>
           <Tag size={16} /> Add a category
+        </button>
+      )}
+
+      {reviewLists.length > 0 && (
+        <CollapsibleSection
+          icon={<ClipboardCheck size={15} />}
+          label="Review lists"
+          count={reviewLists.length}
+          open={openSections.review}
+          onToggle={() => toggle("review")}
+        >
+          <div style={styles.pageSubtitle}>Items waiting on a decision from their approver.</div>
+          <div style={styles.taskList}>
+            {reviewLists.map((list) => {
+              const total = list.itemIds.length;
+              const decided = Object.keys(list.decisions || {}).length;
+              return (
+                <div key={list.id} style={styles.taskRow} onClick={() => onOpenReviewList(list.id)}>
+                  <div style={styles.taskRowLeft}>
+                    <span style={styles.taskRowPerson}>{list.name}</span>
+                    <ArrowRight size={13} color={MUTED} />
+                    <span style={styles.taskRowDest}>{personName(list.approverId)}</span>
+                  </div>
+                  <span style={styles.taskRowMeta}>{decided}/{total} decided</span>
+                </div>
+              );
+            })}
+          </div>
+          <button style={styles.addTile} onClick={onAddReviewList}>
+            <Plus size={16} /> Create a review list
+          </button>
+        </CollapsibleSection>
+      )}
+      {reviewLists.length === 0 && (
+        <button style={styles.addTile} onClick={onAddReviewList}>
+          <ClipboardCheck size={16} /> Create a review list
         </button>
       )}
     </div>
@@ -1287,6 +1401,9 @@ function ItemDetailModal({ item, propertyName, personName, showLocation, onClose
   return (
     <ModalShell onClose={onClose} title={item.name} width={460}>
       <div style={styles.formGrid}>
+        {item.discardStatus === "discard" && (
+          <div style={styles.discardBanner}><AlertCircle size={14} /> Marked to discard or sell</div>
+        )}
         {item.photo && <img src={item.photo} alt={item.name} style={styles.detailPhoto} />}
 
         <div style={styles.detailRow}>
@@ -1512,6 +1629,194 @@ function TaskDetailModal({ task, items, personName, propertyName, onClose, onEdi
           <button style={styles.secondaryBtn} onClick={() => onDelete(task)}><Trash2 size={14} /> Delete</button>
           <button style={styles.secondaryBtn} onClick={() => onEdit(task)}><Edit3 size={14} /> Edit</button>
           <button style={styles.primaryBtn} onClick={() => onComplete(task)}><CheckCircle2 size={15} /> Mark moved</button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+/* ---------- Review list: create ---------- */
+function ReviewListModal({ people, properties, items, propertyName, onClose, onSave }) {
+  const [name, setName] = useState(`Review — ${new Date().toLocaleDateString()}`);
+  const [approverId, setApproverId] = useState(people[0]?.id || "");
+  const [itemIds, setItemIds] = useState([]);
+  const [search, setSearch] = useState("");
+  const [error, setError] = useState("");
+  const [expandedGroups, setExpandedGroups] = useState({});
+
+  const candidateItems = useMemo(() => {
+    return items.filter((it) => !search.trim() || it.name.toLowerCase().includes(search.trim().toLowerCase()));
+  }, [items, search]);
+
+  const grouped = useMemo(() => {
+    const byProperty = {};
+    for (const it of candidateItems) {
+      const propId = it.propertyId;
+      if (!byProperty[propId]) byProperty[propId] = { propertyId: propId, categories: {} };
+      const catName = it.category || "Uncategorized";
+      if (!byProperty[propId].categories[catName]) byProperty[propId].categories[catName] = [];
+      byProperty[propId].categories[catName].push(it);
+    }
+    return Object.values(byProperty).sort((a, b) => propertyName(a.propertyId).localeCompare(propertyName(b.propertyId)));
+  }, [candidateItems, propertyName]);
+
+  const toggleItem = (id) => setItemIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  const toggleGroup = (key) => setExpandedGroups((g) => ({ ...g, [key]: !g[key] }));
+  const isExpanded = (key) => (search.trim() ? true : !!expandedGroups[key]);
+
+  const handleSave = () => {
+    if (!name.trim()) return setError("Give the list a name.");
+    if (!approverId) return setError("Choose an approver.");
+    if (itemIds.length === 0) return setError("Pick at least one item to review.");
+    onSave({
+      id: uid(),
+      name: name.trim(),
+      approverId,
+      itemIds,
+      decisions: {},
+      dateCreated: new Date().toISOString(),
+    });
+  };
+
+  return (
+    <ModalShell onClose={onClose} title="Create a review list" width={540}>
+      <div style={styles.formGrid}>
+        <div style={styles.formRow2}>
+          <Field label="List name">
+            <input style={styles.input} value={name} onChange={(e) => setName(e.target.value)} />
+          </Field>
+          <Field label="Approver">
+            <select style={styles.input} value={approverId} onChange={(e) => setApproverId(e.target.value)}>
+              {people.length === 0 && <option value="">Add a person first</option>}
+              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </Field>
+        </div>
+
+        <Field label={`Items to review (${itemIds.length} selected)`}>
+          <input
+            style={{ ...styles.input, marginBottom: 6 }}
+            placeholder="Search items…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <div style={styles.taskItemPicker}>
+            {grouped.length === 0 && (
+              <div style={{ fontSize: 12.5, color: MUTED, padding: "8px 4px" }}>No matching items.</div>
+            )}
+            {grouped.map((propGroup) => {
+              const propKey = propGroup.propertyId;
+              const propItemCount = Object.values(propGroup.categories).flat().length;
+              return (
+                <div key={propKey} style={styles.taskGroupProperty}>
+                  <button type="button" style={styles.taskGroupBar} onClick={() => toggleGroup(propKey)}>
+                    {isExpanded(propKey) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    <span style={{ fontWeight: 600, flex: 1, textAlign: "left" }}>{propertyName(propKey)}</span>
+                    <span style={styles.taskItemPickerLocation}>{propItemCount}</span>
+                  </button>
+                  {isExpanded(propKey) && Object.entries(propGroup.categories).map(([catName, catItems]) => {
+                    const catKey = `${propKey}::${catName}`;
+                    return (
+                      <div key={catKey} style={styles.taskGroupCategory}>
+                        <button type="button" style={styles.taskGroupBarSmall} onClick={() => toggleGroup(catKey)}>
+                          {isExpanded(catKey) ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                          <span style={{ flex: 1, textAlign: "left" }}>{catName}</span>
+                          <span style={styles.taskItemPickerLocation}>{catItems.length}</span>
+                        </button>
+                        {isExpanded(catKey) && catItems.map((it) => (
+                          <label key={it.id} style={{ ...styles.taskItemPickerRow, paddingLeft: 30 }}>
+                            <input type="checkbox" checked={itemIds.includes(it.id)} onChange={() => toggleItem(it.id)} />
+                            <span style={{ flex: 1 }}>{it.name}</span>
+                          </label>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </Field>
+
+        {error && <div style={styles.formError}><AlertCircle size={14} /> {error}</div>}
+
+        <div style={styles.formActions}>
+          <button style={styles.secondaryBtn} onClick={onClose}>Cancel</button>
+          <button style={styles.primaryBtn} onClick={handleSave}><Check size={15} /> Create list</button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+/* ---------- Review list: decide ---------- */
+function ReviewListDetailModal({ list, items, properties, personName, propertyName, onClose, onDelete, onDecide }) {
+  const [movingItemId, setMovingItemId] = useState(null);
+  const [moveDestination, setMoveDestination] = useState("");
+
+  if (!list) return null;
+  const listItems = list.itemIds.map((id) => items.find((it) => it.id === id)).filter(Boolean);
+  const decisionLabel = (action, destinationPropertyId) => {
+    if (action === "keep") return "Left as is";
+    if (action === "discard") return "Marked to discard/sell";
+    if (action === "move") return `Queued to move → ${propertyName(destinationPropertyId)}`;
+    return "Pending";
+  };
+
+  return (
+    <ModalShell onClose={onClose} title={list.name} width={540}>
+      <div style={styles.formGrid}>
+        <div style={styles.detailRow}>
+          <span style={styles.detailLabel}>Approver</span>
+          <span style={styles.detailValue}>{personName(list.approverId)}</span>
+        </div>
+
+        <div style={styles.taskItemPicker}>
+          {listItems.map((it) => {
+            const decision = list.decisions?.[it.id];
+            return (
+              <div key={it.id} style={styles.reviewItemRow}>
+                <div style={styles.reviewItemTop}>
+                  <span style={{ fontWeight: 600, flex: 1 }}>{it.name}</span>
+                  <span style={styles.taskItemPickerLocation}>{propertyName(it.propertyId)}</span>
+                </div>
+                <div style={styles.reviewItemStatus}>
+                  {decisionLabel(decision?.action, decision?.destinationPropertyId)}
+                </div>
+                {movingItemId === it.id ? (
+                  <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                    <select style={{ ...styles.input, flex: 1 }} value={moveDestination} onChange={(e) => setMoveDestination(e.target.value)}>
+                      <option value="">Choose destination…</option>
+                      {properties.filter((p) => p.id !== it.propertyId).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                    <button
+                      style={styles.secondaryBtn}
+                      onClick={() => {
+                        if (!moveDestination) return;
+                        onDecide(it.id, "move", moveDestination);
+                        setMovingItemId(null);
+                        setMoveDestination("");
+                      }}
+                    >
+                      <Check size={14} />
+                    </button>
+                    <button style={styles.iconBtn} onClick={() => setMovingItemId(null)}><X size={14} /></button>
+                  </div>
+                ) : (
+                  <div style={styles.reviewItemActions}>
+                    <button style={styles.secondaryBtn} onClick={() => onDecide(it.id, "keep")}>Leave as is</button>
+                    <button style={styles.secondaryBtn} onClick={() => setMovingItemId(it.id)}>Queue to move</button>
+                    <button style={styles.secondaryBtn} onClick={() => onDecide(it.id, "discard")}>Discard/sell</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={styles.formActions}>
+          <button style={styles.secondaryBtn} onClick={() => onDelete(list)}><Trash2 size={14} /> Delete list</button>
+          <button style={styles.primaryBtn} onClick={onClose}><Check size={15} /> Done</button>
         </div>
       </div>
     </ModalShell>
@@ -2016,12 +2321,13 @@ function PeopleModal({ people, tasks, propertyName, onClose, onSave, onDelete, o
 
 /* ---------- Confirm modal ---------- */
 function ConfirmModal({ label, type, onCancel, onConfirm }) {
-  const noun = type === "property" ? "property" : type === "category" ? "category" : type === "room" ? "location" : type === "task" ? "task" : "item";
+  const noun = type === "property" ? "property" : type === "category" ? "category" : type === "room" ? "location" : type === "task" ? "task" : type === "reviewList" ? "review list" : "item";
   const warning =
     type === "property" ? "This will also remove every item logged under it."
     : type === "category" ? "Items in this category will move to Uncategorized, not be deleted."
     : type === "room" ? "Items with this location will show no location, not be deleted."
     : type === "task" ? "The items themselves won't be touched — only the task."
+    : type === "reviewList" ? "Items and any decisions already made won't be touched — only the list."
     : "This can't be undone.";
   return (
     <ModalShell onClose={onCancel} title={`Delete this ${noun}?`} width={400}>
@@ -2236,7 +2542,7 @@ const styles = {
   loginTitle: { fontFamily: FONT_DISPLAY, fontSize: 21, fontWeight: 600, color: INK },
   loginSubtitle: { fontSize: 13, color: MUTED, marginTop: -10, marginBottom: 6 },
   loginInputWrap: { display: "flex", alignItems: "center", gap: 8, border: `3px solid ${BORDER}`, borderRadius: 4, padding: "9px 11px", background: "#fff" },
-  loginInput: { border: "none", outline: "none", fontSize: 13.5, background: "transparent", width: "100%" },
+  loginInput: { border: "none", outline: "none", fontSize: 16, background: "transparent", width: "100%", color: TEXT, colorScheme: "light" },
   loginFootnote: { fontSize: 11.5, color: MUTED, textAlign: "center", lineHeight: 1.5, marginTop: 4 },
   whoAreYouRow: {
     display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
@@ -2263,8 +2569,8 @@ const styles = {
   headerActions: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" },
 
   searchBox: { display: "flex", alignItems: "center", gap: 6, background: "#fff", border: `3px solid ${BORDER}`, borderRadius: 12, padding: "7px 10px", minWidth: 190 },
-  searchInput: { border: "none", outline: "none", fontSize: 13, background: "transparent", width: "100%" },
-  filterSelect: { border: `3px solid ${BORDER}`, borderRadius: 12, padding: "7px 8px", fontSize: 12.5, background: "#fff", color: TEXT },
+  searchInput: { border: "none", outline: "none", fontSize: 16, background: "transparent", width: "100%" },
+  filterSelect: { border: `3px solid ${BORDER}`, borderRadius: 12, padding: "7px 8px", fontSize: 16, background: "#fff", color: TEXT },
 
   primaryBtn: { display: "flex", alignItems: "center", gap: 6, background: BRASS, color: "#fff", border: `3px solid ${BORDER}`, borderRadius: 12, boxShadow: `3px 3px 0 ${BORDER}`, padding: "9px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
   secondaryBtn: { display: "flex", alignItems: "center", gap: 6, background: "#fff", color: TEXT, border: `3px solid ${BORDER}`, borderRadius: 12, boxShadow: `3px 3px 0 ${BORDER}`, padding: "9px 13px", fontSize: 13, cursor: "pointer" },
@@ -2310,6 +2616,14 @@ const styles = {
     borderBottom: `3px solid ${BORDER}`, cursor: "pointer",
   },
   taskItemPickerLocation: { fontSize: 11, color: MUTED, fontFamily: FONT_MONO, whiteSpace: "nowrap" },
+  reviewItemRow: { padding: "10px 12px", borderBottom: `1px solid ${BORDER}` },
+  reviewItemTop: { display: "flex", alignItems: "center", gap: 8, fontSize: 13 },
+  reviewItemStatus: { fontSize: 11.5, color: MUTED, marginTop: 2 },
+  reviewItemActions: { display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 },
+  discardBanner: {
+    display: "flex", alignItems: "center", gap: 6, background: "#F3D9CF", color: "#A64D3D",
+    borderRadius: 10, padding: "8px 12px", fontSize: 12.5, fontWeight: 600,
+  },
   taskGroupProperty: { borderBottom: `3px solid ${BORDER}` },
   taskGroupBar: {
     display: "flex", alignItems: "center", gap: 8, width: "100%", background: PAPER_DARK,
@@ -2394,7 +2708,7 @@ const styles = {
   formRow2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
   fieldWrap: { display: "flex", flexDirection: "column", gap: 5 },
   fieldLabel: { fontSize: 11.5, letterSpacing: 0.3, color: MUTED, textTransform: "uppercase", fontWeight: 600 },
-  input: { border: `3px solid ${BORDER}`, borderRadius: 10, padding: "9px 11px", fontSize: 13.5, background: "#fff", color: TEXT, width: "100%" },
+  input: { border: `3px solid ${BORDER}`, borderRadius: 10, padding: "9px 11px", fontSize: 16, background: "#fff", color: TEXT, width: "100%" },
   customFieldRow: { display: "flex", gap: 6, marginBottom: 6, alignItems: "center" },
   addFieldBtn: { display: "flex", alignItems: "center", gap: 5, background: "transparent", border: `3px dashed ${BORDER}`, borderRadius: 3, padding: "6px 10px", fontSize: 12, color: MUTED, cursor: "pointer", marginTop: 2 },
   formError: { display: "flex", alignItems: "center", gap: 6, color: "#A64D3D", fontSize: 12.5 },
