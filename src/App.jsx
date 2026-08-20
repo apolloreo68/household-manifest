@@ -683,6 +683,30 @@ function Breadcrumb({ property, category, onHome, onProperty }) {
 }
 
 /* ---------- Home: collapsible sections ---------- */
+// Long-press detector, independent of the drag library: holding a tile
+// still for a moment (without much finger/mouse movement) fires the
+// callback. Used to unlock rearrange mode, the same two-step gesture as
+// the iPhone home screen — hold to unlock, then a separate drag to move.
+function useLongPress(onLongPress, { delay = 500, moveThreshold = 10 } = {}) {
+  const timerRef = useRef(null);
+  const startPos = useRef({ x: 0, y: 0 });
+  const start = (e) => {
+    startPos.current = { x: e.clientX, y: e.clientY };
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      onLongPress();
+    }, delay);
+  };
+  const clear = () => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+  };
+  const move = (e) => {
+    if (!timerRef.current) return;
+    if (Math.abs(e.clientX - startPos.current.x) > moveThreshold || Math.abs(e.clientY - startPos.current.y) > moveThreshold) clear();
+  };
+  return { onPointerDown: start, onPointerUp: clear, onPointerLeave: clear, onPointerCancel: clear, onPointerMove: move };
+}
+
 function HomeView({
   properties, categories,
   itemCountForProperty, itemCountForCategoryGlobal, hasGlobalUncategorized,
@@ -694,13 +718,15 @@ function HomeView({
   const [openSections, setOpenSections] = useState({ houses: false, storage: false, categories: false });
   const toggle = (key) => setOpenSections((s) => ({ ...s, [key]: !s[key] }));
 
-  // Shared drag sensors: a mouse/trackpad drag needs to move a few pixels
-  // before it counts as a drag (so a plain click still opens the tile), and
-  // on touch it needs a brief press-and-hold first, so dragging never fights
-  // with normal page scrolling.
+  // Only one section can be "unlocked" for rearranging at a time — hold a
+  // tile to unlock its section (tiles start jiggling), drag to reorder,
+  // then tap Done. Outside this mode, dragging is impossible, so an
+  // ordinary tap or scroll can never be mistaken for a drag.
+  const [rearrangeSection, setRearrangeSection] = useState(null);
+
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } })
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 100, tolerance: 8 } })
   );
 
   if (properties.length === 0) {
@@ -725,6 +751,7 @@ function HomeView({
           open={openSections.houses}
           onToggle={() => toggle("houses")}
         >
+          <RearrangeBar active={rearrangeSection === "houses"} onDone={() => setRearrangeSection(null)} />
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
@@ -738,7 +765,9 @@ function HomeView({
                 {houses.map((p) => (
                   <PropertyTile key={p.id} property={p} colorIndex={properties.indexOf(p)}
                     count={itemCountForProperty(p.id)} onOpen={() => onOpen(p.id)}
-                    onEdit={() => onEdit(p)} onDelete={() => onDelete(p)} />
+                    onEdit={() => onEdit(p)} onDelete={() => onDelete(p)}
+                    rearranging={rearrangeSection === "houses"}
+                    onRequestRearrange={() => setRearrangeSection("houses")} />
                 ))}
               </TileGrid>
             </SortableContext>
@@ -754,6 +783,7 @@ function HomeView({
           open={openSections.storage}
           onToggle={() => toggle("storage")}
         >
+          <RearrangeBar active={rearrangeSection === "storage"} onDone={() => setRearrangeSection(null)} />
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
@@ -767,7 +797,9 @@ function HomeView({
                 {storage.map((p) => (
                   <PropertyTile key={p.id} property={p} colorIndex={properties.indexOf(p)}
                     count={itemCountForProperty(p.id)} onOpen={() => onOpen(p.id)}
-                    onEdit={() => onEdit(p)} onDelete={() => onDelete(p)} />
+                    onEdit={() => onEdit(p)} onDelete={() => onDelete(p)}
+                    rearranging={rearrangeSection === "storage"}
+                    onRequestRearrange={() => setRearrangeSection("storage")} />
                 ))}
               </TileGrid>
             </SortableContext>
@@ -788,6 +820,7 @@ function HomeView({
           onToggle={() => toggle("categories")}
         >
           <div style={styles.pageSubtitle}>See everything in a category, across every property. Press and hold a tile to reorder.</div>
+          <RearrangeBar active={rearrangeSection === "categories"} onDone={() => setRearrangeSection(null)} />
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
@@ -806,6 +839,8 @@ function HomeView({
                     color={TILE_COLORS[i % TILE_COLORS.length]}
                     count={itemCountForCategoryGlobal(cat.name)}
                     onOpen={() => onOpenGlobalCategory(cat.name)}
+                    rearranging={rearrangeSection === "categories"}
+                    onRequestRearrange={() => setRearrangeSection("categories")}
                   />
                 ))}
                 {hasGlobalUncategorized && (
@@ -832,6 +867,16 @@ function HomeView({
   );
 }
 
+function RearrangeBar({ active, onDone }) {
+  if (!active) return null;
+  return (
+    <div style={styles.rearrangeBar}>
+      <span>Hold and drag a tile to move it.</span>
+      <button style={styles.primaryBtn} onClick={onDone}>Done</button>
+    </div>
+  );
+}
+
 function CollapsibleSection({ icon, label, count, open, onToggle, children }) {
   return (
     <div style={styles.collapsibleSection}>
@@ -852,46 +897,68 @@ function TileGrid({ children }) {
   return <div style={styles.tileGrid}>{children}</div>;
 }
 
-function PropertyTile({ property, colorIndex, count, onOpen, onEdit, onDelete }) {
+function PropertyTile({ property, colorIndex, count, rearranging, onOpen, onEdit, onDelete, onRequestRearrange }) {
   const color = TILE_COLORS[colorIndex % TILE_COLORS.length];
   const Icon = property.type === "house" ? Home : Warehouse;
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: property.id });
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: property.id, disabled: !rearranging });
+  const longPress = useLongPress(onRequestRearrange);
   const style = {
     ...styles.tile,
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.5 : 1,
     zIndex: isDragging ? 10 : 1,
-    touchAction: "none",
+    touchAction: rearranging ? "none" : "auto",
+    cursor: rearranging ? "grab" : "pointer",
   };
+  const dragProps = rearranging ? { ...attributes, ...listeners } : {};
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners} onClick={onOpen}>
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={rearranging && !isDragging ? "jiggle" : ""}
+      {...dragProps}
+      {...longPress}
+      onClick={rearranging ? undefined : onOpen}
+    >
       <div style={{ ...styles.tileIconWrap, background: color + "22", color }}>
         <Icon size={26} />
       </div>
       <div style={styles.tileName}>{property.name}</div>
       <div style={styles.tileMeta}>{count} item{count === 1 ? "" : "s"}</div>
-      <div style={styles.tileActions}>
-        <button style={styles.tileIconBtn} onClick={(e) => { e.stopPropagation(); onEdit(); }}><Edit3 size={13} /></button>
-        <button style={styles.tileIconBtn} onClick={(e) => { e.stopPropagation(); onDelete(); }}><Trash2 size={13} /></button>
-      </div>
+      {!rearranging && (
+        <div style={styles.tileActions}>
+          <button style={styles.tileIconBtn} onClick={(e) => { e.stopPropagation(); onEdit(); }}><Edit3 size={13} /></button>
+          <button style={styles.tileIconBtn} onClick={(e) => { e.stopPropagation(); onDelete(); }}><Trash2 size={13} /></button>
+        </div>
+      )}
     </div>
   );
 }
 
-function CategoryTile({ id, name, color, count, onOpen }) {
+function CategoryTile({ id, name, color, count, rearranging, onOpen, onRequestRearrange }) {
   const Icon = categoryIcon(name);
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id, disabled: !rearranging });
+  const longPress = useLongPress(onRequestRearrange);
   const style = {
     ...styles.tile,
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.5 : 1,
     zIndex: isDragging ? 10 : 1,
-    touchAction: "none",
+    touchAction: rearranging ? "none" : "auto",
+    cursor: rearranging ? "grab" : "pointer",
   };
+  const dragProps = rearranging ? { ...attributes, ...listeners } : {};
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners} onClick={onOpen}>
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={rearranging && !isDragging ? "jiggle" : ""}
+      {...dragProps}
+      {...longPress}
+      onClick={rearranging ? undefined : onOpen}
+    >
       <div style={{ ...styles.tileIconWrap, background: color + "22", color }}><Icon size={26} /></div>
       <div style={styles.tileName}>{name}</div>
       <div style={styles.tileMeta}>{count} item{count === 1 ? "" : "s"}</div>
@@ -1316,6 +1383,7 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
   const [photoBusy, setPhotoBusy] = useState(false);
   const [error, setError] = useState("");
   const fileInputRef = useRef(null);
+  const cameraInputRef = useRef(null);
 
   const currentCategoryObj = categories.find((c) => c.name === category);
   const availableSubcategories = currentCategoryObj?.subcategories || [];
@@ -1341,6 +1409,7 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
     } finally {
       setPhotoBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+      if (cameraInputRef.current) cameraInputRef.current.value = "";
     }
   };
 
@@ -1384,20 +1453,38 @@ function ItemFormModal({ item, properties, people, categories, defaultPropertyId
               </button>
             </div>
           ) : (
-            <button
-              style={styles.secondaryBtn}
-              type="button"
-              disabled={photoBusy}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              {photoBusy ? <Loader2 size={14} className="spin" /> : <Camera size={14} />}
-              {photoBusy ? "Processing…" : "Add a photo"}
-            </button>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                style={styles.secondaryBtn}
+                type="button"
+                disabled={photoBusy}
+                onClick={() => cameraInputRef.current?.click()}
+              >
+                {photoBusy ? <Loader2 size={14} className="spin" /> : <Camera size={14} />}
+                {photoBusy ? "Processing…" : "Take photo"}
+              </button>
+              <button
+                style={styles.secondaryBtn}
+                type="button"
+                disabled={photoBusy}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <ImageIcon size={14} /> Choose photo
+              </button>
+            </div>
           )}
           <input
             ref={fileInputRef}
             type="file"
             accept="image/*"
+            onChange={handlePhotoChange}
+            style={{ display: "none" }}
+          />
+          <input
+            ref={cameraInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
             onChange={handlePhotoChange}
             style={{ display: "none" }}
           />
@@ -1880,6 +1967,12 @@ function GlobalStyle() {
       ::placeholder { color: #A8A395; }
       .spin { animation: spin 1s linear infinite; }
       @keyframes spin { to { transform: rotate(360deg); } }
+      .jiggle { animation: jiggle 0.22s ease-in-out infinite; }
+      @keyframes jiggle {
+        0% { transform: rotate(-1deg); }
+        50% { transform: rotate(1.2deg); }
+        100% { transform: rotate(-1deg); }
+      }
     `}</style>
   );
 }
@@ -1967,6 +2060,10 @@ const styles = {
   collapsibleBarLabel: { fontFamily: FONT_DISPLAY, fontSize: 15.5, fontWeight: 600 },
   collapsibleBarCount: { fontFamily: FONT_MONO, fontSize: 11.5, color: MUTED, background: PAPER_DARK, padding: "2px 8px", borderRadius: 20 },
   collapsibleContent: { padding: "14px 2px 4px" },
+  rearrangeBar: {
+    display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+    background: PAPER_DARK, borderRadius: 4, padding: "8px 12px", marginBottom: 10, fontSize: 12.5, color: TEXT,
+  },
 
   taskList: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 },
   taskRow: {
