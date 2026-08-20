@@ -105,6 +105,8 @@ export default function App() {
 
   const [data, setData] = useState(emptyData());
   const [ready, setReady] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
 
   // view: 'home' | 'property' | 'category' | 'globalCategory' | 'room'
   const [view, setView] = useState("home");
@@ -208,19 +210,26 @@ export default function App() {
     // Only listen once someone's signed in — the security rules require it,
     // and there's no point paying for a listener nobody's allowed to read.
     if (!authUser) { setReady(false); return; }
+    setLoadError(false);
     const unsubscribe = onSnapshot(
       MANIFEST_DOC,
       (snap) => {
         if (snap.exists()) setData({ ...emptyData(), ...snap.data() });
         setReady(true);
+        setLoadError(false);
       },
       (err) => {
         console.error("listen failed", err);
-        setReady(true);
+        setLoadError(true);
+        // Deliberately NOT calling setReady(true) here. Doing so used to let
+        // the autosave effect below write today's local state — which, on a
+        // failed load, is still just the empty default — straight over
+        // whatever real data is sitting in Firestore. Autosave now only
+        // arms after a load has actually succeeded at least once.
       }
     );
     return () => unsubscribe();
-  }, [authUser]);
+  }, [authUser, retryCount]);
 
   useDebouncedSave(data, ready && !!authUser);
 
@@ -536,6 +545,24 @@ export default function App() {
       <div style={styles.app}>
         <GlobalStyle />
         <LoginScreen />
+      </div>
+    );
+  }
+
+  if (!ready && loadError) {
+    return (
+      <div style={styles.loadingScreen}>
+        <GlobalStyle />
+        <AlertCircle size={30} color="#A64D3D" />
+        <div style={{ marginTop: 14, fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 600, color: TEXT, textAlign: "center", padding: "0 24px" }}>
+          Couldn't load your data
+        </div>
+        <div style={{ marginTop: 6, fontFamily: FONT_BODY, color: "#9C8468", textAlign: "center", padding: "0 24px", fontSize: 13.5, maxWidth: 360 }}>
+          Check your internet connection. Nothing will be changed or saved until this connects successfully — it's safe to wait and retry.
+        </div>
+        <button style={{ ...styles.primaryBtn, marginTop: 16 }} onClick={() => setRetryCount((c) => c + 1)}>
+          Try again
+        </button>
       </div>
     );
   }
