@@ -607,7 +607,10 @@ export default function App() {
           <SearchResultsView
             results={homeSearchResults}
             propertyName={propertyName}
+            personName={personName}
             onOpenItem={(it) => setItemDetail(it.id)}
+            onBatchReviewList={(ids) => setReviewListModal({ presetItemIds: ids })}
+            onBatchMoveTask={(ids) => setTaskModal({ mode: "create", presetItemIds: ids })}
           />
         ) : view === "home" ? (
           <HomeView
@@ -627,7 +630,7 @@ export default function App() {
             reviewLists={data.reviewLists || []}
             personName={personName}
             onOpenReviewList={(id) => setReviewListDetail(id)}
-            onAddReviewList={() => setReviewListModal(true)}
+            onAddReviewList={() => setReviewListModal({})}
           />
         ) : view === "property" ? (
           <PropertyView
@@ -657,14 +660,19 @@ export default function App() {
             propertyName={propertyName}
             onAddItem={() => setItemModal({ mode: "create" })}
             onOpenItem={(it) => setItemDetail(it.id)}
+            onBatchReviewList={(ids) => setReviewListModal({ presetItemIds: ids })}
+            onBatchMoveTask={(ids) => setTaskModal({ mode: "create", presetItemIds: ids })}
           />
         ) : view === "room" ? (
           <RoomView
             property={selectedProperty}
             room={selectedRoom}
             items={currentItems}
+            personName={personName}
             onAddItem={() => setItemModal({ mode: "create" })}
             onOpenItem={(it) => setItemDetail(it.id)}
+            onBatchReviewList={(ids) => setReviewListModal({ presetItemIds: ids })}
+            onBatchMoveTask={(ids) => setTaskModal({ mode: "create", presetItemIds: ids })}
           />
         ) : null}
       </main>
@@ -742,6 +750,7 @@ export default function App() {
         <TaskModal
           task={taskModal.task}
           presetPersonId={taskModal.presetPersonId}
+          presetItemIds={taskModal.presetItemIds}
           people={people}
           properties={properties}
           items={items}
@@ -770,6 +779,7 @@ export default function App() {
           properties={properties}
           items={items}
           propertyName={propertyName}
+          presetItemIds={reviewListModal.presetItemIds}
           onClose={() => setReviewListModal(false)}
           onSave={(list) => { upsertReviewList(list); setReviewListModal(false); }}
         />
@@ -1243,12 +1253,16 @@ function PropertyView({
 }
 
 /* ---------- Category view: item list ---------- */
-function CategoryView({ property, category, subcategories, items, personName, propertyName, onAddItem, onOpenItem }) {
+function CategoryView({ property, category, subcategories, items, personName, propertyName, onAddItem, onOpenItem, onBatchReviewList, onBatchMoveTask }) {
   const hasPhotos = items.some((it) => it.photo);
   const [showPhotos, setShowPhotos] = useState(true);
   const [subFilter, setSubFilter] = useState("");
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
 
   const visibleItems = subFilter ? items.filter((it) => (it.subcategory || "") === subFilter) : items;
+  const toggleSelected = (id) => setSelectedIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  const exitSelectMode = () => { setSelectMode(false); setSelectedIds([]); };
 
   return (
     <div>
@@ -1264,6 +1278,11 @@ function CategoryView({ property, category, subcategories, items, personName, pr
             <button style={styles.secondaryBtn} onClick={() => setShowPhotos((s) => !s)}>
               {showPhotos ? <ImageOff size={14} /> : <ImageIcon size={14} />}
               {showPhotos ? "Hide photos" : "Show photos"}
+            </button>
+          )}
+          {visibleItems.length > 0 && (
+            <button style={styles.secondaryBtn} onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}>
+              {selectMode ? "Cancel" : "Select"}
             </button>
           )}
           <button style={styles.primaryBtn} onClick={onAddItem}><Plus size={16} /> Log item</button>
@@ -1299,26 +1318,43 @@ function CategoryView({ property, category, subcategories, items, personName, pr
           onAction={onAddItem}
         />
       ) : (
-        <div style={styles.itemTileGrid}>
+        <div style={styles.itemList}>
           {visibleItems.map((it) => (
-            <ItemCompactTile
+            <ItemListRow
               key={it.id}
               item={it}
+              personName={personName}
               showPhoto={showPhotos}
               locationLabel={property ? null : propertyName(it.propertyId)}
+              selectMode={selectMode}
+              selected={selectedIds.includes(it.id)}
+              onToggleSelect={() => toggleSelected(it.id)}
               onClick={() => onOpenItem(it)}
             />
           ))}
         </div>
+      )}
+
+      {selectMode && selectedIds.length > 0 && (
+        <BatchActionBar
+          count={selectedIds.length}
+          onReviewList={() => { onBatchReviewList(selectedIds); exitSelectMode(); }}
+          onMoveTask={() => { onBatchMoveTask(selectedIds); exitSelectMode(); }}
+        />
       )}
     </div>
   );
 }
 
 /* ---------- Room view: item list ---------- */
-function RoomView({ property, room, items, onAddItem, onOpenItem }) {
+function RoomView({ property, room, items, personName, onAddItem, onOpenItem, onBatchReviewList, onBatchMoveTask }) {
   const hasPhotos = items.some((it) => it.photo);
   const [showPhotos, setShowPhotos] = useState(true);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
+
+  const toggleSelected = (id) => setSelectedIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  const exitSelectMode = () => { setSelectMode(false); setSelectedIds([]); };
 
   return (
     <div>
@@ -1334,6 +1370,11 @@ function RoomView({ property, room, items, onAddItem, onOpenItem }) {
               {showPhotos ? "Hide photos" : "Show photos"}
             </button>
           )}
+          {items.length > 0 && (
+            <button style={styles.secondaryBtn} onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}>
+              {selectMode ? "Cancel" : "Select"}
+            </button>
+          )}
           <button style={styles.primaryBtn} onClick={onAddItem}><Plus size={16} /> Log item</button>
         </div>
       </div>
@@ -1346,46 +1387,114 @@ function RoomView({ property, room, items, onAddItem, onOpenItem }) {
           onAction={onAddItem}
         />
       ) : (
-        <div style={styles.itemTileGrid}>
+        <div style={styles.itemList}>
           {items.map((it) => (
-            <ItemCompactTile key={it.id} item={it} showPhoto={showPhotos} onClick={() => onOpenItem(it)} />
+            <ItemListRow
+              key={it.id}
+              item={it}
+              personName={personName}
+              showPhoto={showPhotos}
+              selectMode={selectMode}
+              selected={selectedIds.includes(it.id)}
+              onToggleSelect={() => toggleSelected(it.id)}
+              onClick={() => onOpenItem(it)}
+            />
           ))}
         </div>
+      )}
+
+      {selectMode && selectedIds.length > 0 && (
+        <BatchActionBar
+          count={selectedIds.length}
+          onReviewList={() => { onBatchReviewList(selectedIds); exitSelectMode(); }}
+          onMoveTask={() => { onBatchMoveTask(selectedIds); exitSelectMode(); }}
+        />
       )}
     </div>
   );
 }
 
-function ItemCompactTile({ item, showPhoto, locationLabel, onClick }) {
+function ItemListRow({ item, personName, showPhoto, locationLabel, selectMode, selected, onToggleSelect, onClick }) {
   const displayPhoto = showPhoto && !!item.photo;
+  const statusLabel = item.status === "in_use" ? "In use"
+    : item.status === "loan" ? `On loan to ${personName(item.loanedTo) || "someone"}`
+    : "In storage";
   return (
-    <div style={styles.itemCompactTile} onClick={onClick}>
-      {displayPhoto && <img src={item.photo} alt={item.name} style={styles.itemCompactPhoto} />}
-      <div style={styles.itemCompactName}>{item.name}</div>
-      {locationLabel && <div style={styles.itemCompactLocation}>{locationLabel}</div>}
+    <div style={styles.itemRow} onClick={selectMode ? onToggleSelect : onClick}>
+      {selectMode && (
+        <div style={{ ...styles.itemRowCheck, ...(selected ? styles.itemRowCheckChecked : {}) }}>
+          {selected && <Check size={14} />}
+        </div>
+      )}
+      {displayPhoto ? (
+        <img src={item.photo} alt={item.name} style={styles.itemRowThumb} />
+      ) : (
+        <div style={{ ...styles.itemRowThumb, ...styles.itemRowThumbEmpty }} />
+      )}
+      <div style={styles.itemRowInfo}>
+        <div style={styles.itemRowName}>{item.name}{item.quantity > 1 ? ` ×${item.quantity}` : ""}</div>
+        <div style={styles.itemRowMeta}>{statusLabel}{locationLabel ? ` · ${locationLabel}` : ""}</div>
+      </div>
+      {!selectMode && <ChevronRight size={16} color={MUTED} />}
+    </div>
+  );
+}
+
+function BatchActionBar({ count, onReviewList, onMoveTask }) {
+  return (
+    <div style={styles.batchBar}>
+      <span>{count} selected</span>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={styles.batchBarBtn} onClick={onMoveTask}>Assign move task</button>
+        <button style={{ ...styles.batchBarBtn, ...styles.batchBarBtnPrimary }} onClick={onReviewList}>Add to review list</button>
+      </div>
     </div>
   );
 }
 
 /* ---------- Search results (home) ---------- */
-function SearchResultsView({ results, propertyName, onOpenItem }) {
+function SearchResultsView({ results, propertyName, personName, onOpenItem, onBatchReviewList, onBatchMoveTask }) {
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const toggleSelected = (id) => setSelectedIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  const exitSelectMode = () => { setSelectMode(false); setSelectedIds([]); };
+
   return (
     <div>
-      <div style={styles.pageSubtitle}>{results.length} result{results.length === 1 ? "" : "s"}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={styles.pageSubtitle}>{results.length} result{results.length === 1 ? "" : "s"}</div>
+        {results.length > 0 && (
+          <button style={styles.secondaryBtn} onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}>
+            {selectMode ? "Cancel" : "Select"}
+          </button>
+        )}
+      </div>
       {results.length === 0 ? (
         <EmptyState icon={<Search size={26} color="#E8834A" />} title="No matches" body="Try a different search term or clear the filter." />
       ) : (
-        <div style={{ ...styles.itemTileGrid, marginTop: 14 }}>
+        <div style={{ ...styles.itemList, marginTop: 10 }}>
           {results.map((it) => (
-            <ItemCompactTile
+            <ItemListRow
               key={it.id}
               item={it}
+              personName={personName}
               showPhoto
               locationLabel={propertyName(it.propertyId)}
+              selectMode={selectMode}
+              selected={selectedIds.includes(it.id)}
+              onToggleSelect={() => toggleSelected(it.id)}
               onClick={() => onOpenItem(it)}
             />
           ))}
         </div>
+      )}
+
+      {selectMode && selectedIds.length > 0 && (
+        <BatchActionBar
+          count={selectedIds.length}
+          onReviewList={() => { onBatchReviewList(selectedIds); exitSelectMode(); }}
+          onMoveTask={() => { onBatchMoveTask(selectedIds); exitSelectMode(); }}
+        />
       )}
     </div>
   );
@@ -1458,11 +1567,11 @@ function ItemDetailModal({ item, propertyName, personName, showLocation, onClose
 }
 
 /* ---------- Task (move list) modal ---------- */
-function TaskModal({ task, presetPersonId, people, properties, items, propertyName, onClose, onSave }) {
+function TaskModal({ task, presetPersonId, presetItemIds, people, properties, items, propertyName, onClose, onSave }) {
   const [personId, setPersonId] = useState(task?.personId || presetPersonId || people[0]?.id || "");
   const [destinationPropertyId, setDestinationPropertyId] = useState(task?.destinationPropertyId || properties[0]?.id || "");
   const [sourcePropertyId, setSourcePropertyId] = useState("");
-  const [itemIds, setItemIds] = useState(task?.itemIds || []);
+  const [itemIds, setItemIds] = useState(task?.itemIds || presetItemIds || []);
   const [notes, setNotes] = useState(task?.notes || "");
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
@@ -1636,10 +1745,10 @@ function TaskDetailModal({ task, items, personName, propertyName, onClose, onEdi
 }
 
 /* ---------- Review list: create ---------- */
-function ReviewListModal({ people, properties, items, propertyName, onClose, onSave }) {
+function ReviewListModal({ people, properties, items, propertyName, presetItemIds, onClose, onSave }) {
   const [name, setName] = useState(`Review — ${new Date().toLocaleDateString()}`);
   const [approverId, setApproverId] = useState(people[0]?.id || "");
-  const [itemIds, setItemIds] = useState([]);
+  const [itemIds, setItemIds] = useState(presetItemIds || []);
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
   const [expandedGroups, setExpandedGroups] = useState({});
@@ -2658,14 +2767,35 @@ const styles = {
   subFilterChipActive: { background: INK, color: "#F2EFE6", borderColor: INK },
   cardGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 14 },
 
-  itemTileGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(108px, 1fr))", gap: 10 },
-  itemCompactTile: {
-    background: "#fff", border: `3px solid ${BORDER}`, borderRadius: 14, padding: "10px 8px",
-    cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: 5, boxShadow: `3px 3px 0 ${BORDER}`,
+  itemList: {
+    display: "flex", flexDirection: "column", background: "#fff",
+    border: `3px solid ${BORDER}`, borderRadius: 16, overflow: "hidden", boxShadow: `4px 4px 0 ${BORDER}`,
   },
-  itemCompactPhoto: { width: "100%", height: 64, objectFit: "cover", borderRadius: 3, marginBottom: 2 },
-  itemCompactName: { fontSize: 12.5, fontWeight: 600, color: TEXT, lineHeight: 1.3, wordBreak: "break-word" },
-  itemCompactLocation: { fontSize: 10, color: MUTED, fontFamily: FONT_MONO },
+  itemRow: {
+    display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
+    borderBottom: `2px solid ${PAPER_DARK}`, cursor: "pointer",
+  },
+  itemRowThumb: { width: 40, height: 40, borderRadius: 9, flexShrink: 0, objectFit: "cover", border: `2px solid ${BORDER}` },
+  itemRowThumbEmpty: { background: PAPER_DARK, border: `2px solid ${BORDER}` },
+  itemRowInfo: { flex: 1, minWidth: 0 },
+  itemRowName: { fontFamily: FONT_DISPLAY, fontSize: 14, fontWeight: 600, color: TEXT },
+  itemRowMeta: { fontSize: 11, color: MUTED, marginTop: 1 },
+  itemRowCheck: {
+    width: 22, height: 22, borderRadius: 7, border: `3px solid ${BORDER}`, flexShrink: 0,
+    display: "flex", alignItems: "center", justifyContent: "center", background: "#fff", color: "#fff",
+  },
+  itemRowCheckChecked: { background: BRASS },
+
+  batchBar: {
+    position: "sticky", bottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between",
+    background: INK, color: "#FFFCF6", borderRadius: 14, padding: "10px 14px", marginTop: 14,
+    fontFamily: FONT_DISPLAY, fontSize: 13, fontWeight: 600, boxShadow: "0 6px 16px rgba(59,42,30,0.3)",
+  },
+  batchBarBtn: {
+    fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 12, border: `2px solid #FFFCF6`,
+    borderRadius: 10, padding: "6px 12px", background: "transparent", color: "#FFFCF6", cursor: "pointer",
+  },
+  batchBarBtnPrimary: { background: BRASS, borderColor: BRASS, color: "#fff" },
 
   detailPhoto: { width: "100%", maxHeight: 220, objectFit: "cover", borderRadius: 4, border: `3px solid ${BORDER}` },
   detailRow: { display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13.5, padding: "2px 0" },
